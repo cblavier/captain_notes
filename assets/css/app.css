@@ -4,7 +4,7 @@
 @import "tailwindcss" source(none);
 @source "../css";
 @source "../js";
-@source "../../lib/pronotex_web";
+@source "../../lib/captain_notes_web";
 
 /* daisyUI Tailwind Plugin. You can update this file by fetching the latest version with:
    curl -sLO https://github.com/saadeghi/daisyui/releases/latest/download/daisyui.js
@@ -639,7 +639,7 @@ body.captain-mirror dialog:modal {
 .holiday-return:hover { background: color-mix(in srgb, var(--day-ink) 90%, var(--surface-background)); border-color: var(--day-ink); }
 .holiday-return:focus-visible { outline: 2px solid var(--day-ink); outline-offset: 3px; }
 .holiday-placeholder > p { margin-top: 0.75rem; color: var(--muted-ink); font-size: 0.75rem; }
-.brand-logo-simple { background: currentColor; mask: url("/images/brand/pronotex-logo-simple.svg") center / contain no-repeat; }
+.brand-logo-simple { background: currentColor; mask: url("/images/brand/captain_notes-logo-simple.svg") center / contain no-repeat; }
 
 .messages-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .messages-header .messages-breadcrumb { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }

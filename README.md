@@ -88,7 +88,7 @@ Les réponses réussies sont conservées uniquement en mémoire : 5 minutes pour
 Prérequis : Docker avec Buildx et Compose. Depuis le dossier du projet, construire l’image Linux amd64 :
 
 ```sh
-docker buildx build --platform linux/amd64 --load -t pronotex:local .
+docker buildx build --platform linux/amd64 --load -t captain_notes:local .
 cp -n .env.docker.example env
 chmod 600 env
 ```
@@ -106,7 +106,7 @@ cp .env.example .env
 # Adapter DATA_DIR, APP_UID et APP_GID dans .env avant de continuer.
 docker compose up -d
 docker compose ps
-docker compose logs --tail=100 -f pronotex
+docker compose logs --tail=100 -f captain_notes
 ```
 
 Le conteneur écoute sur **127.0.0.1:4123** sur la machine hôte. Configurer un reverse proxy avec un certificat valide pour servir `https://<PHX_HOST>` et transmettre les requêtes vers `http://127.0.0.1:4123`, avec `X-Forwarded-Proto: https` et la prise en charge des WebSockets. HTTPS est nécessaire aux cookies de connexion en production.
@@ -114,13 +114,13 @@ Le conteneur écoute sur **127.0.0.1:4123** sur la machine hôte. Configurer un 
 Pour déployer sur une autre machine, exporter l’image :
 
 ```sh
-docker save -o pronotex-image.tar pronotex:local
+docker save -o captain_notes-image.tar captain_notes:local
 ```
 
 Transférer l’archive, `docker-compose.yml`, le fichier `env` et la configuration `.env` sur la machine cible, puis exécuter dans leur dossier :
 
 ```sh
-docker load -i pronotex-image.tar
+docker load -i captain_notes-image.tar
 docker compose up -d --force-recreate
 ```
 
@@ -138,7 +138,7 @@ APP_GID=1000
 DOCKER_PLATFORM=linux/amd64
 ```
 
-Remplacer `APP_UID` et `APP_GID` par les résultats de `id -u` et `id -g` du compte qui possède le dossier sur le serveur. Pour un autre emplacement, renseigner par exemple `DATA_DIR=/srv/pronotex/data`, créer ce dossier et donner à ce compte le droit d'y écrire. Le conteneur utilise cette identité non privilégiée ; aucun changement récursif de propriétaire n'est effectué. Le dossier doit exister : Compose refuse de le créer implicitement avec des permissions inadaptées. La base garde son chemin interne `/app/data/pronotex.db`.
+Remplacer `APP_UID` et `APP_GID` par les résultats de `id -u` et `id -g` du compte qui possède le dossier sur le serveur. Pour un autre emplacement, renseigner par exemple `DATA_DIR=/srv/captain_notes/data`, créer ce dossier et donner à ce compte le droit d'y écrire. Le conteneur utilise cette identité non privilégiée ; aucun changement récursif de propriétaire n'est effectué. Le dossier doit exister : Compose refuse de le créer implicitement avec des permissions inadaptées. La base garde son chemin interne `/app/data/captain_notes.db`.
 
 ## Notifications de nouvelles notes
 

@@ -19,7 +19,7 @@ async function main() {
   await fs.mkdir(destination, {recursive: true});
   const logos = new Map();
   for (const ratio of new Set(screens.map(screen => screen[2]))) {
-    logos.set(ratio, await sharp(path.join(root, "priv/static/images/brand/pronotex-logo-detailed.svg"), {density: 96 * ratio})
+    logos.set(ratio, await sharp(path.join(root, "priv/static/images/brand/captain_notes-logo-detailed.svg"), {density: 96 * ratio})
       .resize(128 * ratio, 128 * ratio, {fit: "contain", background: "#00000000"})
       .png().toBuffer());
   }
@@ -39,6 +39,6 @@ async function main() {
 />`);
     }
   }
-  await fs.writeFile(path.join(root, "lib/pronotex_web/components/layouts/startup_images.html.heex"), links.join("\n") + "\n");
+  await fs.writeFile(path.join(root, "lib/captain_notes_web/components/layouts/startup_images.html.heex"), links.join("\n") + "\n");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

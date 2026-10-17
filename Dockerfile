@@ -24,11 +24,11 @@ FROM ${ELIXIR_IMAGE} AS runner
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=builder --chown=nobody:nogroup /app/_build/prod/rel/pronotex ./
+COPY --from=builder --chown=nobody:nogroup /app/_build/prod/rel/captain_notes ./
 RUN mkdir -p /app/data && chown nobody:nogroup /app/data && chmod 700 /app/data
 ENV LANG=C.UTF-8 MIX_ENV=prod PHX_SERVER=true PORT=4000 TZ=Europe/Paris
 USER nobody
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl --fail --silent --output /dev/null "http://127.0.0.1:${PORT}/" || exit 1
-CMD ["/app/bin/pronotex", "start"]
+CMD ["/app/bin/captain_notes", "start"]

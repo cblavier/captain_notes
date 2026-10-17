@@ -1,9 +1,9 @@
-defmodule Pronotex.MixProject do
+defmodule CaptainNotes.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :pronotex,
+      app: :captain_notes,
       version: "0.1.0",
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -20,7 +20,7 @@ defmodule Pronotex.MixProject do
   # Type `mix help compile.app` for more information.
   def application do
     [
-      mod: {Pronotex.Application, []},
+      mod: {CaptainNotes.Application, []},
       extra_applications: [:logger, :crypto, :public_key]
     ]
   end
@@ -74,10 +74,10 @@ defmodule Pronotex.MixProject do
     [
       setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
-      "assets.build": ["compile", "tailwind pronotex", "esbuild pronotex"],
+      "assets.build": ["compile", "tailwind captain_notes", "esbuild captain_notes"],
       "assets.deploy": [
-        "tailwind pronotex --minify",
-        "esbuild pronotex --minify",
+        "tailwind captain_notes --minify",
+        "esbuild captain_notes --minify",
         "phx.digest"
       ],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]

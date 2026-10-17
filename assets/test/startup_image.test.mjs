@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
-const root = readFileSync(new URL('../../lib/pronotex_web/components/layouts/root.html.heex', import.meta.url), 'utf8');
+const root = readFileSync(new URL('../../lib/captain_notes_web/components/layouts/root.html.heex', import.meta.url), 'utf8');
 const source = root.match(/<script id="select-startup-image">([\s\S]*?)<\/script>/)[1];
-const images = readFileSync(new URL('../../lib/pronotex_web/components/layouts/startup_images.html.heex', import.meta.url), 'utf8');
+const images = readFileSync(new URL('../../lib/captain_notes_web/components/layouts/startup_images.html.heex', import.meta.url), 'utf8');
 
 function launch(width, height, ratio) {
   let portrait = true;

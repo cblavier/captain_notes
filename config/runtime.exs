@@ -1,9 +1,9 @@
 import Config
 
-config :pronotex, :push_subject, System.get_env("WEB_PUSH_SUBJECT")
+config :captain_notes, :push_subject, System.get_env("WEB_PUSH_SUBJECT")
 
 if config_env() != :test do
-  config :pronotex,
+  config :captain_notes,
          :background_refresh,
          System.get_env("PRONOTE_BACKGROUND_REFRESH", "true") != "false"
 end
@@ -20,20 +20,20 @@ end
 # If you use `mix release`, you need to explicitly enable the server
 # by passing the PHX_SERVER=true when you start it:
 #
-#     PHX_SERVER=true bin/pronotex start
+#     PHX_SERVER=true bin/captain_notes start
 #
 # Alternatively, you can use `mix phx.gen.release` to generate a `bin/server`
 # script that automatically sets the env var above.
 if System.get_env("PHX_SERVER") do
-  config :pronotex, PronotexWeb.Endpoint, server: true
+  config :captain_notes, CaptainNotesWeb.Endpoint, server: true
 end
 
-config :pronotex, PronotexWeb.Endpoint,
+config :captain_notes, CaptainNotesWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
-  config :pronotex, Pronotex.Repo,
-    database: System.get_env("DATABASE_PATH", "/app/data/pronotex.db")
+  config :captain_notes, CaptainNotes.Repo,
+    database: System.get_env("DATABASE_PATH", "/app/data/captain_notes.db")
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
@@ -49,7 +49,7 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
-  config :pronotex, PronotexWeb.Endpoint,
+  config :captain_notes, CaptainNotesWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
       # Enable IPv6 and bind on all interfaces.
@@ -65,7 +65,7 @@ if config_env() == :prod do
   # To get SSL working, you will need to add the `https` key
   # to your endpoint configuration:
   #
-  #     config :pronotex, PronotexWeb.Endpoint,
+  #     config :captain_notes, CaptainNotesWeb.Endpoint,
   #       https: [
   #         ...,
   #         port: 443,
@@ -87,7 +87,7 @@ if config_env() == :prod do
   # We also recommend setting `force_ssl` in your config/prod.exs,
   # ensuring no data is ever sent via http, always redirecting to https:
   #
-  #     config :pronotex, PronotexWeb.Endpoint,
+  #     config :captain_notes, CaptainNotesWeb.Endpoint,
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.

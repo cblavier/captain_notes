@@ -1,4 +1,4 @@
-defmodule Pronotex.Repo.Migrations.CreatePushNotifications do
+defmodule CaptainNotes.Repo.Migrations.CreatePushNotifications do
   use Ecto.Migration
 
   def change do

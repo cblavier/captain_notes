@@ -1,4 +1,4 @@
-defmodule Pronotex.Repo.Migrations.CreateAuthSessions do
+defmodule CaptainNotes.Repo.Migrations.CreateAuthSessions do
   use Ecto.Migration
 
   def change do

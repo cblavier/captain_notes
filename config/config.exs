@@ -7,12 +7,12 @@
 # General application configuration
 import Config
 
-config :pronotex, :environment, config_env()
+config :captain_notes, :environment, config_env()
 
-config :pronotex, ecto_repos: [Pronotex.Repo]
+config :captain_notes, ecto_repos: [CaptainNotes.Repo]
 
-config :pronotex, Pronotex.Repo,
-  database: Path.expand("../data/pronotex_#{config_env()}.db", __DIR__),
+config :captain_notes, CaptainNotes.Repo,
+  database: Path.expand("../data/captain_notes_#{config_env()}.db", __DIR__),
   pool_size: 1,
   log: false,
   journal_mode: :wal,
@@ -31,20 +31,20 @@ config :phoenix, :filter_parameters, [
 ]
 
 # Configure the endpoint
-config :pronotex, PronotexWeb.Endpoint,
+config :captain_notes, CaptainNotesWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   render_errors: [
-    formats: [html: PronotexWeb.ErrorHTML, json: PronotexWeb.ErrorJSON],
+    formats: [html: CaptainNotesWeb.ErrorHTML, json: CaptainNotesWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: Pronotex.PubSub,
+  pubsub_server: CaptainNotes.PubSub,
   live_view: [signing_salt: "qcgcPIs4"]
 
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
-  pronotex: [
+  captain_notes: [
     args:
       ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
     cd: Path.expand("../assets", __DIR__),
@@ -54,7 +54,7 @@ config :esbuild,
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.1.12",
-  pronotex: [
+  captain_notes: [
     args: ~w(
       --input=assets/css/app.css
       --output=priv/static/assets/css/app.css

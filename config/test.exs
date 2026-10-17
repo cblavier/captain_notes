@@ -1,9 +1,9 @@
 import Config
-config :pronotex, :background_refresh, false
+config :captain_notes, :background_refresh, false
 
-config :pronotex, Pronotex.Repo, database: ":memory:"
+config :captain_notes, CaptainNotes.Repo, database: ":memory:"
 
-config :pronotex, :accounts, [
+config :captain_notes, :accounts, [
   %{
     id: "family",
     role: :family,
@@ -35,7 +35,7 @@ config :pronotex, :accounts, [
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
-config :pronotex, PronotexWeb.Endpoint,
+config :captain_notes, CaptainNotesWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "T+qW++kFZhJtjeKa6vNu5BHQuBweT+vkrr5GnpAailH6RJl4ytjuFQBVcjga8A1h",
   server: false
@@ -55,4 +55,4 @@ config :phoenix_live_view,
 config :phoenix,
   sort_verified_routes_query_params: true
 
-config :pronotex, :push_delivery, false
+config :captain_notes, :push_delivery, false

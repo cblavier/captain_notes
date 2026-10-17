@@ -1,4 +1,4 @@
-defmodule Pronotex.Test.PronoteServer do
+defmodule CaptainNotes.Test.PronoteServer do
   @moduledoc false
   import ExUnit.Assertions
 

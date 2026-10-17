@@ -1,4 +1,4 @@
-defmodule Pronotex.Repo.Migrations.CreateGradeHistory do
+defmodule CaptainNotes.Repo.Migrations.CreateGradeHistory do
   use Ecto.Migration
 
   def change do

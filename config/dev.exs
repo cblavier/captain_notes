@@ -6,7 +6,7 @@ import Config
 # The watchers configuration can be used to run external
 # watchers to your application. For example, we can use it
 # to bundle .js and .css sources.
-config :pronotex, PronotexWeb.Endpoint,
+config :captain_notes, CaptainNotesWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {0, 0, 0, 0}],
@@ -15,8 +15,8 @@ config :pronotex, PronotexWeb.Endpoint,
   debug_errors: true,
   secret_key_base: "nJdQINYaqAOLJWEc6vSPp9hj3j5JNpnDFKODxtfeN/wL+3/njylxMfzWiG4eLOOe",
   watchers: [
-    esbuild: {Esbuild, :install_and_run, [:pronotex, ~w(--sourcemap=inline --watch)]},
-    tailwind: {Tailwind, :install_and_run, [:pronotex, ~w(--watch)]}
+    esbuild: {Esbuild, :install_and_run, [:captain_notes, ~w(--sourcemap=inline --watch)]},
+    tailwind: {Tailwind, :install_and_run, [:captain_notes, ~w(--watch)]}
   ]
 
 # ## SSL Support
@@ -43,7 +43,7 @@ config :pronotex, PronotexWeb.Endpoint,
 # different ports.
 
 # Reload browser tabs when matching files change.
-config :pronotex, PronotexWeb.Endpoint,
+config :captain_notes, CaptainNotesWeb.Endpoint,
   live_reload: [
     web_console_logger: true,
     patterns: [
@@ -52,8 +52,8 @@ config :pronotex, PronotexWeb.Endpoint,
       # Gettext translations
       ~r"priv/gettext/.*\.po$"E,
       # Router, Controllers, LiveViews and LiveComponents
-      ~r"lib/pronotex_web/router\.ex$"E,
-      ~r"lib/pronotex_web/(controllers|live|components)/.*\.(ex|heex)$"E
+      ~r"lib/captain_notes_web/router\.ex$"E,
+      ~r"lib/captain_notes_web/(controllers|live|components)/.*\.(ex|heex)$"E
     ]
   ]
 

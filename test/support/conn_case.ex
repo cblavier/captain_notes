@@ -1,4 +1,4 @@
-defmodule PronotexWeb.ConnCase do
+defmodule CaptainNotesWeb.ConnCase do
   @moduledoc "Connection helpers for Phoenix tests without a database."
 
   use ExUnit.CaseTemplate
@@ -6,19 +6,21 @@ defmodule PronotexWeb.ConnCase do
   using do
     quote do
       # The default endpoint for testing
-      @endpoint PronotexWeb.Endpoint
+      @endpoint CaptainNotesWeb.Endpoint
 
-      use PronotexWeb, :verified_routes
+      use CaptainNotesWeb, :verified_routes
 
       # Import conveniences for testing with connections
       import Plug.Conn
       import Phoenix.ConnTest
-      import PronotexWeb.ConnCase
+      import CaptainNotesWeb.ConnCase
     end
   end
 
   setup do
-    conn = Phoenix.ConnTest.build_conn() |> Plug.Test.init_test_session(Pronotex.Auth.session())
+    conn =
+      Phoenix.ConnTest.build_conn() |> Plug.Test.init_test_session(CaptainNotes.Auth.session())
+
     {:ok, conn: conn}
   end
 end

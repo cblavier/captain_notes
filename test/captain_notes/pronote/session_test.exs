@@ -1,0 +1,1100 @@
+defmodule CaptainNotes.Pronote.SessionTest do
+  use ExUnit.Case, async: false
+  alias CaptainNotes.Pronote
+  import ExUnit.CaptureLog
+  alias CaptainNotes.Pronote.{Config, Error, Session}
+  alias CaptainNotes.Test.PronoteServer
+
+  defp session(options \\ []) do
+    options = Keyword.merge([encrypted: true, compressed: true], options)
+    options = if options[:direct_student], do: Keyword.put(options, :space, 3), else: options
+    agent = start_supervised!({Agent, fn -> PronoteServer.initial(options) end})
+    Req.Test.stub(__MODULE__, &PronoteServer.handle(&1, agent))
+
+    config = %Config{
+      url: "https://school.test/pronote/parent.html",
+      username: "Parent",
+      password: "PaSsWord-TEST"
+    }
+
+    config =
+      if options[:direct_student],
+        do: %{config | url: "https://school.test/pronote/eleve.html", space: 3},
+        else: config
+
+    student_agent =
+      start_supervised!({Agent, fn -> PronoteServer.initial(Keyword.put(options, :space, 3)) end},
+        id: :student_agent
+      )
+
+    Req.Test.stub(__MODULE__.Student, &PronoteServer.handle(&1, student_agent))
+    student_config = %{config | url: "https://school.test/pronote/eleve.html", space: 3}
+    student_configs = if options[:student], do: %{"child-a" => student_config}, else: %{}
+
+    server =
+      start_supervised!(
+        {Session,
+         name: nil,
+         account: options[:account],
+         config: config,
+         req_options: [plug: {Req.Test, __MODULE__}],
+         student_configs: student_configs,
+         student_req_options: [plug: {Req.Test, __MODULE__.Student}]}
+      )
+
+    Req.Test.allow(__MODULE__, self(), server)
+    Req.Test.allow(__MODULE__.Student, self(), server)
+    {server, if(options[:student], do: student_agent, else: agent)}
+  end
+
+  test "correspondence includes absences and observations and caches without writes" do
+    {server, agent} = session()
+    assert {:ok, [absence, newer, older]} = Pronote.correspondence("child-a", server)
+    assert absence.category == "Absence aux cours"
+    assert absence.justified == true
+    refute hd(absence.messages).content =~ "Absence justifiée"
+    assert newer.subject == "Encouragement"
+    assert newer.author == "Mme Martin"
+    assert hd(newer.messages).title == "Français"
+    assert newer.unread == 1
+    assert older.subject == "Observation"
+    calls = Agent.get(agent, & &1.calls)
+    assert {:ok, [^absence, ^newer, ^older]} = Pronote.correspondence("child-a", server)
+    assert Agent.get(agent, & &1.calls) == calls
+    assert {:error, %Error{reason: :child_not_found}} = Pronote.correspondence("foreign", server)
+    assert Agent.get(agent, & &1.calls) == calls
+  end
+
+  test "old correspondence caches are replaced before rendering justification badges" do
+    alias CaptainNotes.Pronote.ReadCache
+    {server, agent} = session(absences_only: true)
+    assert {:ok, [entry]} = Pronote.correspondence("child-a", server)
+    old = [Map.drop(entry, [:justified, :presentation_version])]
+    operation = {:correspondence, "child-a"}
+
+    key =
+      :sys.get_state(ReadCache).entries
+      |> Map.keys()
+      |> Enum.find(fn
+        {^server, {identity, ^operation}} -> identity != :display
+        _ -> false
+      end)
+
+    ReadCache.put(key, old, 300_000, ReadCache.generation(key))
+    ReadCache.remember(server, operation, old)
+    assigns = %{section: "carnet", child: %{id: "child-a"}}
+
+    assert :miss =
+             CaptainNotesWeb.DashboardCache.fetch(
+               ReadCache.display(server),
+               assigns,
+               {:messages_load, nil}
+             )
+
+    calls = Agent.get(agent, & &1.calls)
+    assert {:ok, [updated]} = Pronote.correspondence("child-a", server)
+    assert updated.justified == true
+    refute Agent.get(agent, & &1.calls) == calls
+
+    assert {:ok, [^updated]} =
+             CaptainNotesWeb.DashboardCache.fetch(
+               ReadCache.display(server),
+               assigns,
+               {:messages_load, nil}
+             )
+  end
+
+  test "an absence-only notebook is readable when observations are disabled" do
+    {server, _} = session(absences_only: true)
+    assert {:ok, [absence]} = Pronote.correspondence("child-a", server)
+    assert absence.category == "Absence aux cours"
+    assert absence.preview =~ "Rendez-vous"
+  end
+
+  test "students can read their correspondence book in their own session" do
+    {server, _} = session(direct_student: true)
+    assert {:ok, [_, _, _]} = Pronote.correspondence("child-a", server)
+  end
+
+  test "replies preserve the conversation reference and are simulated without HTTP writes" do
+    {server, agent} = session(account: "parent-1")
+    assert {:ok, context} = Pronote.reply_context("discussion", server)
+    assert context.subject == "Réunion"
+    assert context.recipients == [%{name: "Mme Martin"}, %{name: "M. Dupont"}]
+    before = Agent.get(agent, & &1.calls)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, :simulated} = Pronote.reply_message("discussion", "Bonjour, merci !", server)
+      end)
+
+    assert Agent.get(agent, & &1.calls) == before
+    assert log =~ ~s("messagePourReponse":{"G":1,"N":"message-2"})
+    assert log =~ ~s("contenu":"Bonjour, merci !")
+    refute log =~ "listeDestinataires"
+    refute log =~ ~s("objet")
+
+    assert {:error, %Error{reason: :reply_unavailable}} =
+             Pronote.reply_message("discussion", "Encore", server)
+  end
+
+  test "reply preparation rejects missing and closed conversations" do
+    {server, _} = session(account: "parent-1", closed_discussion: true)
+
+    for id <- ["discussion", "foreign"] do
+      assert {:error, %Error{reason: :reply_unavailable}} = Pronote.reply_context(id, server)
+    end
+  end
+
+  test "reply preparation rejects conversations with no reply action" do
+    {server, _} = session(account: "parent-1", no_reply: true)
+
+    assert {:error, %Error{reason: :reply_unavailable}} =
+             Pronote.reply_context("discussion", server)
+  end
+
+  test "student replies use the student session" do
+    {server, _} = session(direct_student: true)
+    assert {:ok, _} = Pronote.reply_context("discussion", server)
+
+    capture_log(fn ->
+      assert {:ok, :simulated} = Pronote.reply_message("discussion", "Merci", server)
+    end)
+  end
+
+  test "the account name is consistent in the composer and both sides of a conversation" do
+    {server, _} =
+      session(
+        account: "parent-1",
+        own_message: true,
+        sender_name: "M. BLAVIER Christian",
+        recipient_names: ["M. BLAVIER C. - BLAVIER Alice (5B)"]
+      )
+
+    assert {:ok, "Christian Blavier"} = Pronote.sender_name(server)
+    assert {:ok, [discussion]} = Pronote.parent_discussions(server)
+    assert List.last(discussion.messages).author == "Christian Blavier"
+    assert Enum.all?(discussion.messages, &(&1.recipients == ["Christian Blavier"]))
+  end
+
+  test "the current user's full name replaces Moi in recipients and reply recipients" do
+    {server, _} = session(account: "parent-1", recipient_names: ["Moi", "Mme Martin"])
+    assert {:ok, [discussion]} = Pronote.parent_discussions(server)
+    assert Enum.all?(discussion.messages, &(&1.recipients == ["Christian Blavier", "Mme Martin"]))
+    assert {:ok, context} = Pronote.reply_context("discussion", server)
+    assert context.recipients == [%{name: "Christian Blavier"}, %{name: "Mme Martin"}]
+  end
+
+  test "sent messages load all recipients while received messages retain their author" do
+    {server, _agent} = session(own_message: true, account: "parent-1")
+    assert {:ok, [discussion]} = Pronote.parent_discussions(server)
+    [received, sent] = discussion.messages
+    assert received.author == "Professeur"
+    assert received.recipients == ["Mme Martin", "M. Dupont"]
+    refute received.own
+    assert sent.own
+    assert sent.author == "Christian Blavier"
+    assert sent.recipients == ["Mme Martin", "M. Dupont"]
+  end
+
+  test "new messages log the connected account payload without writing to Pronote" do
+    for options <- [[], [direct_student: true]] do
+      # Each iteration uses distinct supervised session processes.
+      {server, agent} = session(options)
+      assert {:ok, recipients} = Pronote.message_recipients(server)
+
+      expected_types = ["Personnel", "Professeur", "Responsable"]
+
+      expected_types =
+        if options == [], do: expected_types ++ ["Responsable"], else: expected_types
+
+      assert Enum.map(recipients, & &1.type) |> Enum.sort() == expected_types
+
+      assert Enum.all?(recipients, &(!Map.has_key?(&1, :resource)))
+      teacher = Enum.find(recipients, &(&1.type == "Professeur"))
+      assert teacher.subjects == ["Mathématiques"]
+
+      log =
+        capture_log(fn ->
+          assert {:ok, :simulated} =
+                   Pronote.send_message(
+                     ["3:contact-3", "34:contact-34"],
+                     "Rendez-vous",
+                     "Bonjour, serait-il possible de nous rencontrer ?",
+                     server
+                   )
+        end)
+
+      assert log =~ "Envoi simulé (test)"
+      assert log =~ "Rendez-vous"
+      assert log =~ "Bonjour, serait-il possible de nous rencontrer ?"
+      assert log =~ "contact-3"
+      assert log =~ "contact-34"
+      refute log =~ "PaSsWord-TEST"
+      refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieMessage"))
+      # The next real read still has the correct PRONOTE sequence number.
+      assert {:ok, _} = Pronote.events("child-a", server)
+      stop_supervised(Session)
+      stop_supervised(:student_agent)
+      stop_supervised(Agent)
+    end
+  end
+
+  test "class parents and delegates are extracted from groups and deduplicated across children" do
+    {server, agent} = session()
+    assert {:ok, recipients} = Pronote.message_recipients(server)
+
+    assert Enum.filter(recipients, &(&1.type == "Responsable")) |> Enum.map(& &1.id) == [
+             "5:contact-5",
+             "5:delegate-5"
+           ]
+
+    log =
+      capture_log(fn ->
+        assert {:ok, :simulated} =
+                 Pronote.send_message(
+                   ["5:contact-5", "5:delegate-5"],
+                   "Réunion de classe",
+                   "Bonjour",
+                   server
+                 )
+      end)
+
+    assert log =~ "contact-5"
+    assert log =~ "delegate-5"
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieMessage"))
+  end
+
+  test "parents unavailable in Pronote cannot be selected for sending" do
+    {server, _} = session(no_parent_recipients: true)
+    assert {:ok, recipients} = Pronote.message_recipients(server)
+    refute Enum.any?(recipients, &(&1.type == "Responsable"))
+
+    assert {:error, %Error{reason: :invalid_message}} =
+             Pronote.send_message(["5:contact-5"], "Réunion de classe", "Bonjour", server)
+  end
+
+  test "forged recipients and empty messages never reach Pronote" do
+    {server, agent} = session()
+    assert {:ok, _} = Pronote.message_recipients(server)
+
+    assert {:error, %Error{reason: :invalid_message}} =
+             Pronote.send_message(["3:foreign"], "Objet", "Message", server)
+
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieMessage"))
+    assert {:error, %Error{reason: :invalid_message}} = Pronote.send_message([], "", "", server)
+  end
+
+  test "simulated sends cannot reach even a server configured to reject writes" do
+    {server, agent} = session(write_error: 10)
+    assert {:ok, _} = Pronote.message_recipients(server)
+
+    capture_log(fn ->
+      assert {:ok, :simulated} = Pronote.send_message(["3:contact-3"], "Objet", "Message", server)
+    end)
+
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieMessage"))
+    assert Agent.get(agent, & &1.logins) == 1
+  end
+
+  test "repeated reads use the cache without rolling back ordered transport state" do
+    {server, agent} = session(direct_student: true)
+
+    reads = [
+      fn -> Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server) end,
+      fn -> Pronote.homework("child-a", ~D[2026-09-14], ~D[2026-09-21], server) end,
+      fn -> Pronote.menus("child-a", ~D[2026-09-14], ~D[2026-09-20], server) end,
+      fn -> Pronote.grades("child-a", nil, server) end,
+      fn -> Pronote.events("child-a", server) end,
+      fn -> Pronote.discussions("child-a", server) end
+    ]
+
+    results = Enum.map(reads, & &1.())
+    assert Enum.all?(results, &match?({:ok, _}, &1))
+    calls = Agent.get(agent, & &1.calls)
+    assert Enum.map(reads, & &1.()) == results
+    assert Agent.get(agent, & &1.calls) == calls
+    assert {:ok, _} = Pronote.lessons("child-a", ~D[2026-09-21], ~D[2026-09-27], server)
+    assert length(Agent.get(agent, & &1.calls)) > length(calls)
+  end
+
+  test "default and explicit grade periods share one remote read" do
+    {server, agent} = session()
+    assert {:ok, report} = Pronote.grades("child-a", nil, server)
+    period = CaptainNotes.Pronote.Grades.period_key(report.period)
+    assert {:ok, ^report} = Pronote.grades("child-a", period, server)
+    assert {:ok, ^report} = Pronote.grades("child-a", report.period, server)
+    assert Enum.count(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "DernieresNotes")) == 1
+  end
+
+  test "display notes remain readable while the numbered session is busy and are cleared on logout" do
+    {server, _} = session()
+    assert {:ok, report} = Pronote.grades("child-a", nil, server)
+    :ok = :sys.suspend(server)
+
+    try do
+      task = Task.async(fn -> CaptainNotes.Pronote.ReadCache.notes(server) end)
+      assert [%{report: ^report, default?: true}] = Task.await(task, 500)
+      # Refreshing unrelated resources must not remove the displayed notes.
+      CaptainNotes.Pronote.ReadCache.invalidate({:owner_kinds, server, [:lessons, :events]})
+      assert [%{report: ^report}] = CaptainNotes.Pronote.ReadCache.notes(server)
+    after
+      :sys.resume(server)
+    end
+
+    assert :ok = Pronote.logout(server)
+    assert [] = CaptainNotes.Pronote.ReadCache.notes(server)
+  end
+
+  test "fresh lesson reads persist cancellation observations for the session profile" do
+    alias CaptainNotes.Push.Baseline
+    CaptainNotes.Repo.delete_all(Baseline)
+    {server, _} = session(account: "family")
+    assert {:ok, _} = Pronote.lessons("child-a", ~D[2026-09-21], ~D[2026-09-27], server)
+    assert [_] = CaptainNotes.Repo.all(Baseline)
+    CaptainNotes.Repo.delete_all(Baseline)
+    assert {:ok, _} = Pronote.lessons("child-a", ~D[2026-09-21], ~D[2026-09-27], server)
+    assert [] = CaptainNotes.Repo.all(Baseline)
+    Pronote.clear_cache(server)
+    assert {:ok, _} = Pronote.lessons("child-a", ~D[2026-09-21], ~D[2026-09-27], server)
+    assert [_] = CaptainNotes.Repo.all(Baseline)
+    CaptainNotes.Repo.delete_all(Baseline)
+  end
+
+  test "manual refresh and logout force fresh reads" do
+    {server, agent} = session()
+    read = fn -> Pronote.events("child-a", server) end
+    assert {:ok, _} = read.()
+    calls = Agent.get(agent, & &1.calls)
+    assert :ok = Pronote.clear_cache(server)
+    assert {:ok, _} = read.()
+    assert length(Agent.get(agent, & &1.calls)) > length(calls)
+    assert :ok = Pronote.logout(server)
+    assert {:ok, _} = read.()
+    assert Agent.get(agent, & &1.logins) == 2
+  end
+
+  test "background refresh forces remote reads without marking messages read" do
+    {server, agent} = session(direct_student: true)
+    Phoenix.PubSub.subscribe(CaptainNotes.PubSub, "pronote:refresh")
+    account = %{id: "child-1", role: :child}
+
+    for _ <- 1..2 do
+      assert :ok =
+               CaptainNotes.Pronote.BackgroundRefresh.refresh_account(account,
+                 allowed?: fn -> true end,
+                 server: server,
+                 today: ~D[2026-09-16]
+               )
+
+      assert_receive {:pronote_refreshed, "child-1"}
+    end
+
+    calls = Agent.get(agent, & &1.calls)
+
+    for function <- ["PageEmploiDuTemps", "DernieresNotes"] do
+      assert Enum.count(calls, &(elem(&1, 0) == function)) == 2
+    end
+
+    # SaisiePublicMessage only reads the recipients; it neither sends nor marks as read.
+    refute Enum.any?(calls, fn {name, _} ->
+             String.starts_with?(name, "Saisie") and name != "SaisiePublicMessage"
+           end)
+  end
+
+  test "only fresh grade responses persist history, shared by parent and student" do
+    import Ecto.Query
+    alias CaptainNotes.GradeHistory.{Scope, AverageSnapshot}
+
+    {server, _} = session()
+    assert {:ok, report} = Pronote.grades("child-a", nil, server)
+
+    client = :sys.get_state(server).client
+    context = CaptainNotes.GradeHistory.context(client, "child-a", report)
+    scope = CaptainNotes.Repo.get_by!(Scope, context)
+
+    snapshots = from(s in AverageSnapshot, where: s.scope_id == ^scope.id)
+    assert CaptainNotes.Repo.exists?(snapshots)
+
+    CaptainNotes.Repo.delete_all(snapshots)
+    assert {:ok, cached} = Pronote.grades("child-a", nil, server)
+    assert cached.average_history == []
+    assert Map.delete(cached, :average_history) == Map.delete(report, :average_history)
+    refute CaptainNotes.Repo.exists?(snapshots)
+
+    Pronote.clear_cache(server)
+    assert {:ok, refreshed} = Pronote.grades("child-a", nil, server)
+    assert [_ | _] = refreshed.average_history
+    assert CaptainNotes.Repo.exists?(snapshots)
+
+    client = %CaptainNotes.Pronote.Client{
+      children: client.children,
+      transport: %CaptainNotes.Pronote.Transport{
+        root: "https://school.test/pronote/",
+        space: 3,
+        session: 999
+      },
+      general: %{
+        "PremierLundi" => %{"V" => "31/08/2026"},
+        "DerniereDate" => %{"V" => "04/07/2027"}
+      }
+    }
+
+    context = CaptainNotes.GradeHistory.context(client, "child-a", report)
+    assert CaptainNotes.Repo.get_by!(Scope, context).id == scope.id
+  end
+
+  test "writes invalidate all cached date ranges and other profile entries" do
+    {server, agent} = session(direct_student: true)
+    read = fn -> Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-21], server) end
+    assert {:ok, [task]} = read.()
+    assert {:ok, _} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+    other_key = {self(), {:other_profile, {:homework, "other-child", :from, :to}}}
+    {:miss, generation} = CaptainNotes.Pronote.ReadCache.fetch(other_key)
+    CaptainNotes.Pronote.ReadCache.put(other_key, :old_status, 30_000, generation)
+    assert {:ok, events} = Pronote.events("child-a", server)
+    assert {:ok, _} = Pronote.set_homework_done("child-a", task.id, false, server)
+    assert {:miss, _} = CaptainNotes.Pronote.ReadCache.fetch(other_key)
+    calls = Agent.get(agent, & &1.calls)
+    assert {:ok, ^events} = Pronote.events("child-a", server)
+    assert Agent.get(agent, & &1.calls) == calls
+    assert {:ok, [%{done: false}]} = read.()
+
+    assert {:ok, [%{done: false}]} =
+             Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert length(Agent.get(agent, & &1.calls)) > length(calls)
+  end
+
+  test "session renewal discards cached reads and errors are not cached" do
+    {server, agent} = session(expire: true)
+    assert {:ok, _} = Pronote.events("child-a", server)
+    assert {:ok, _} = Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+    assert Agent.get(agent, & &1.logins) == 2
+    calls = Agent.get(agent, & &1.calls)
+    assert {:ok, _} = Pronote.events("child-a", server)
+    assert length(Agent.get(agent, & &1.calls)) > length(calls)
+    assert {:error, _} = Pronote.events("unknown", server)
+
+    refute Enum.any?(:sys.get_state(CaptainNotes.Pronote.ReadCache).entries, fn
+             {{owner, {_, operation}}, _} -> owner == server and operation == {:events, "unknown"}
+             _ -> false
+           end)
+  end
+
+  test "inbox combines and deduplicates notices without implicitly marking them read" do
+    {server, agent} = session(direct_student: true, notices: true)
+    assert {:ok, items} = Pronote.discussions("child-a", server)
+    assert Enum.map(items, & &1.kind) == [:information, :survey, :discussion]
+    assert Enum.sum(Enum.map(items, & &1.unread)) == 4
+    assert Agent.get(agent, & &1.notice_reads) == %{}
+    information = hd(items)
+
+    assert [%{content: "Information publiée", resources: [%{name: "Document"}]}] =
+             information.messages
+
+    assert {:ok, updated} = Pronote.set_discussion_read("child-a", information.id, true, server)
+    assert Enum.find(updated, &(&1.id == information.id)).unread == 0
+    assert Enum.find(updated, &(&1.id == information.id)).acknowledged
+    refute Enum.find(updated, &(&1.id == information.id)).can_acknowledge
+    before = Agent.get(agent, & &1.calls)
+
+    assert {:error, %Error{reason: :stale_discussion}} =
+             Pronote.set_discussion_read("child-a", information.id, false, server)
+
+    assert Agent.get(agent, & &1.calls) == before
+
+    assert {:error, %Error{reason: :stale_discussion}} =
+             Pronote.set_discussion_read("child-a", "notice-unknown", true, server)
+  end
+
+  test "direct child profile reads only its own data and writes through its own session" do
+    {server, agent} = session(direct_student: true)
+    assert {:ok, [%{id: "child-a"}]} = Pronote.children(server)
+    assert {:ok, [_]} = Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+    assert {:ok, _} = Pronote.grades("child-a", nil, server)
+    assert {:ok, _} = Pronote.menus("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+    assert {:ok, _} = Pronote.events("child-a", server)
+    assert {:ok, [task | _]} = Pronote.homework("child-a", ~D[2026-09-14], ~D[2026-09-21], server)
+    assert {:ok, tasks} = Pronote.set_homework_done("child-a", task.id, true, server)
+    assert Enum.find(tasks, &(&1.id == task.id)).done
+    assert {:ok, [discussion]} = Pronote.discussions("child-a", server)
+
+    assert {:ok, [%{unread: 0}]} =
+             Pronote.set_discussion_read("child-a", discussion.id, true, server)
+
+    before = Agent.get(agent, & &1.calls)
+
+    for operation <- [
+          fn -> Pronote.lessons("child-b", ~D[2026-09-14], ~D[2026-09-20], server) end,
+          fn -> Pronote.grades("child-b", nil, server) end,
+          fn -> Pronote.menus("child-b", ~D[2026-09-14], ~D[2026-09-20], server) end,
+          fn -> Pronote.events("child-b", server) end,
+          fn -> Pronote.homework("child-b", ~D[2026-09-14], ~D[2026-09-20], server) end,
+          fn -> Pronote.discussions("child-b", server) end,
+          fn -> Pronote.set_discussion_read("child-b", discussion.id, true, server) end,
+          fn -> Pronote.set_homework_done("child-b", task.id, true, server) end
+        ] do
+      assert {:error, %Error{reason: :child_not_found}} = operation.()
+    end
+
+    assert Agent.get(agent, & &1.calls) == before
+  end
+
+  test "parent notices retain the parent recipient when changing their read status" do
+    {server, _} = session(account: "parent-1", notices: true)
+    assert {:ok, items} = Pronote.parent_discussions(server)
+    notice = Enum.find(items, &(&1.kind == :information))
+    assert {:ok, updated} = Pronote.set_parent_discussion_read(notice.id, true, server)
+    assert Enum.find(updated, &(&1.id == notice.id)).unread == 0
+  end
+
+  test "only personal inbox reads establish message notification baselines" do
+    alias CaptainNotes.{Repo, Push.Baseline}
+    Repo.delete_all(Baseline)
+    {server, _} = session(student: true, account: "parent-1")
+    assert {:ok, [_]} = Pronote.discussions("child-a", server)
+    assert Repo.all(Baseline) == []
+    assert {:ok, [_]} = Pronote.parent_discussions(server)
+    assert [_] = Repo.all(Baseline)
+  end
+
+  test "direct child inbox reads establish message notification baselines" do
+    alias CaptainNotes.{Repo, Push.Baseline}
+    Repo.delete_all(Baseline)
+    {server, _} = session(direct_student: true, account: "child-1")
+    assert {:ok, [_]} = Pronote.discussions("child-a", server)
+    assert [_] = Repo.all(Baseline)
+  end
+
+  test "parent inbox is separate from child inbox and requires a parent profile" do
+    for banner <- CaptainNotes.NotificationBanners.list("parent-1"),
+        do: CaptainNotes.NotificationBanners.dismiss("parent-1", banner["tag"])
+
+    {server, student_agent} = session(student: true, account: "parent-1")
+    assert {:ok, [parent]} = Pronote.parent_discussions(server)
+    assert CaptainNotes.AppBadge.count("parent-1") == 1
+    assert {:ok, [%{unread: 0}]} = Pronote.set_parent_discussion_read(parent.id, true, server)
+    assert CaptainNotes.AppBadge.count("parent-1") == 0
+    assert {:ok, [%{unread: 2}]} = Pronote.discussions("child-a", server)
+    assert CaptainNotes.AppBadge.count("parent-1") == 0
+
+    refute Enum.any?(Agent.get(student_agent, & &1.calls), fn {name, _} ->
+             name == "SaisieMessage"
+           end)
+
+    assert {:ok, [%{unread: 0}]} = Pronote.parent_discussions(server)
+
+    for account <- ["family", "child-1"] do
+      :sys.replace_state(server, &%{&1 | options: Keyword.put(&1.options, :account, account)})
+      assert {:error, %Error{reason: :forbidden}} = Pronote.parent_discussions(server)
+
+      assert {:error, %Error{reason: :forbidden}} =
+               Pronote.set_parent_discussion_read(parent.id, false, server)
+    end
+  end
+
+  test "parent message writes are not retried on an expired session" do
+    {server, agent} = session(account: "parent-1", write_error: 10)
+    assert {:ok, [parent]} = Pronote.parent_discussions(server)
+
+    assert {:error, %Error{reason: :session_expired}} =
+             Pronote.set_parent_discussion_read(parent.id, true, server)
+
+    assert Enum.count(Agent.get(agent, & &1.calls), fn {name, _} -> name == "SaisieMessage" end) ==
+             1
+  end
+
+  for {encrypted, compressed} <- [{false, false}, {true, false}, {false, true}, {true, true}] do
+    test "login and timetable with encryption=#{encrypted}, compression=#{compressed}" do
+      {server, agent} = session(encrypted: unquote(encrypted), compressed: unquote(compressed))
+      assert {:ok, [%{id: "child-a"}, %{id: "child-b"}]} = Pronote.login(server)
+      assert {:ok, "Christian Blavier"} = Pronote.sender_name(server)
+      assert {:ok, [lesson]} = Pronote.lessons("child-b", ~D[2026-09-14], ~D[2026-09-20], server)
+      assert lesson.child_id == "child-b"
+      assert lesson.subject == "Maths child-b"
+      assert lesson.start == ~N[2026-09-14 08:00:00]
+      assert lesson.end == ~N[2026-09-14 08:55:00]
+      assert lesson.canceled
+      assert lesson.teachers == ["Professeur"]
+      assert lesson.classrooms == ["Salle 12"]
+      assert Agent.get(agent, & &1.logins) == 1
+    end
+  end
+
+  test "student discussions are read without marking and explicit changes are confirmed" do
+    {server, agent} = session(student: true)
+    assert {:ok, [discussion]} = Pronote.discussions("child-a", server)
+    assert discussion.unread == 2
+    assert hd(discussion.messages).content == "Bonjour"
+    refute Enum.any?(Agent.get(agent, & &1.calls), fn {name, _} -> name == "SaisieMessage" end)
+
+    assert {:ok, [%{unread: 0}]} =
+             Pronote.set_discussion_read("child-a", discussion.id, true, server)
+
+    assert {:ok, [%{unread: 2}]} =
+             Pronote.set_discussion_read("child-a", discussion.id, false, server)
+  end
+
+  test "discussion access requires matching student credentials" do
+    {server, _} = session(student: true, wrong_student: true)
+    assert {:error, %Error{reason: :student_mismatch}} = Pronote.discussions("child-a", server)
+
+    assert {:error, %Error{reason: :student_credentials_required}} =
+             Pronote.discussions("child-b", server)
+  end
+
+  test "unknown discussions cannot be marked and message writes are never retried" do
+    {server, agent} = session(student: true, write_error: 10)
+    assert {:ok, [_]} = Pronote.discussions("child-a", server)
+
+    assert {:error, %Error{reason: :stale_discussion}} =
+             Pronote.set_discussion_read("child-a", "other", true, server)
+
+    assert {:ok, [_]} = Pronote.discussions("child-a", server)
+
+    assert {:error, %Error{reason: :session_expired}} =
+             Pronote.set_discussion_read("child-a", "discussion", true, server)
+
+    assert Enum.count(Agent.get(agent, & &1.calls), fn {name, _} -> name == "SaisieMessage" end) ==
+             1
+  end
+
+  test "both children reuse one session, concurrent reads remain correctly associated" do
+    {server, agent} = session()
+    parent = self()
+
+    for id <- ["child-a", "child-b"] do
+      start_supervised!(
+        {Task,
+         fn -> send(parent, {id, Pronote.lessons(id, ~D[2026-09-14], ~D[2026-09-20], server)}) end},
+        id: id
+      )
+    end
+
+    assert_receive {"child-a", {:ok, [%{subject: "Maths child-a"}]}}, 2000
+    assert_receive {"child-b", {:ok, [%{subject: "Maths child-b"}]}}, 2000
+    assert Agent.get(agent, & &1.logins) == 1
+  end
+
+  test "reads all weeks and filters dates inclusively" do
+    {server, _} = session()
+    assert {:ok, lessons} = Pronote.lessons("child-a", ~D[2026-09-15], ~D[2026-09-28], server)
+    assert Enum.map(lessons, & &1.start) == [~N[2026-09-21 08:00:00], ~N[2026-09-28 08:00:00]]
+  end
+
+  test "reconnects once after an expired session and keeps the requested child" do
+    {server, agent} = session(expire: true)
+
+    assert {:ok, [%{child_id: "child-b"}]} =
+             Pronote.lessons("child-b", ~D[2026-09-14], ~D[2026-09-20], server)
+
+    assert Agent.get(agent, & &1.logins) == 2
+  end
+
+  test "does not loop on repeated expiry" do
+    {server, agent} = session(expire: :always)
+
+    assert {:error, %Error{reason: :session_expired}} =
+             Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+
+    assert Agent.get(agent, & &1.logins) == 2
+  end
+
+  test "rejects invalid ranges before any network request" do
+    {server, agent} = session()
+
+    assert {:error, %Error{reason: :invalid_dates}} =
+             Pronote.lessons("child-a", ~D[2026-09-20], ~D[2026-09-14], server)
+
+    assert Agent.get(agent, & &1.logins) == 0
+  end
+
+  test "rejects an unknown child" do
+    {server, agent} = session()
+
+    assert {:error, %Error{reason: :child_not_found}} =
+             Pronote.lessons("other", ~D[2026-09-14], ~D[2026-09-20], server)
+
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "PageEmploiDuTemps"))
+  end
+
+  test "rejects dates outside the school's year" do
+    {server, _} = session()
+
+    assert {:error, %Error{reason: :outside_school_year}} =
+             Pronote.lessons("child-a", ~D[2025-09-14], ~D[2025-09-20], server)
+  end
+
+  test "local validation errors preserve the session for subsequent dashboard reads" do
+    {server, agent} = session()
+    assert {:ok, _} = Pronote.children(server)
+    client = :sys.get_state(server).client
+
+    assert {:error, %Error{reason: :outside_school_year}} =
+             Pronote.lessons("child-a", ~D[2026-08-17], ~D[2026-08-23], server)
+
+    assert :sys.get_state(server).client == client
+
+    assert {:error, %Error{reason: :child_not_found}} =
+             Pronote.events("unknown", server)
+
+    assert :sys.get_state(server).client == client
+    assert {:ok, _} = Pronote.events("child-a", server)
+
+    assert {:ok, [_]} =
+             Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+
+    assert Agent.get(agent, & &1.logins) == 1
+  end
+
+  test "a locally unavailable tab does not discard the parent session" do
+    {server, agent} = session(forbidden: true)
+    assert {:ok, children} = Pronote.children(server)
+    client = :sys.get_state(server).client
+    assert {:error, %Error{reason: :forbidden}} = Pronote.events("child-a", server)
+    assert :sys.get_state(server).client == client
+    assert {:ok, ^children} = Pronote.children(server)
+    assert Agent.get(agent, & &1.logins) == 1
+  end
+
+  test "does not access unauthorized tabs" do
+    {server, _} = session(forbidden: true)
+
+    assert {:error, %Error{reason: :forbidden}} =
+             Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+  end
+
+  test "reports failed login without returning private data" do
+    {server, agent} = session(bad_credentials: true)
+    assert {:error, %Error{reason: :authentication_failed} = error} = Pronote.login(server)
+    refute inspect(error) =~ "PaSsWord-TEST"
+    assert Agent.get(agent, & &1.logins) == 1
+  end
+
+  test "reports extra authentication without changing account settings" do
+    {server, agent} = session(mfa: true)
+    assert {:error, %Error{reason: :additional_authentication_required}} = Pronote.login(server)
+
+    refute Enum.any?(
+             Agent.get(agent, & &1.calls),
+             &(elem(&1, 0) == "SecurisationCompteDoubleAuth")
+           )
+  end
+
+  test "logout drops the session; inspection hides credentials and keys" do
+    {server, agent} = session()
+    assert {:ok, _} = Pronote.login(server)
+    refute inspect(:sys.get_status(server)) =~ "PaSsWord-TEST"
+    assert :ok = Pronote.logout(server)
+    assert {:ok, _} = Pronote.children(server)
+    assert Agent.get(agent, & &1.logins) == 2
+  end
+
+  test "does not retry a failed POST and can reconnect on the next explicit read" do
+    {server, agent} = session()
+    assert {:ok, _} = Pronote.login(server)
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Agent.update(agent, &Map.update(&1, :http_errors, 1, fn n -> n + 1 end))
+      Plug.Conn.send_resp(conn, 503, "private response")
+    end)
+
+    assert {:error, %Error{reason: :http, code: 503} = error} =
+             Pronote.lessons("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+
+    refute inspect(error) =~ "private response"
+    assert Agent.get(agent, & &1.http_errors) == 1
+    Req.Test.stub(__MODULE__, &PronoteServer.handle(&1, agent))
+    assert {:ok, _} = Pronote.children(server)
+    assert Agent.get(agent, & &1.logins) == 2
+  end
+
+  test "returns a safe network error without retrying" do
+    {server, agent} = session()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Agent.update(agent, &Map.update(&1, :http_errors, 1, fn n -> n + 1 end))
+      Req.Test.transport_error(conn, :timeout)
+    end)
+
+    assert {:error, %Error{reason: :network}} = Pronote.login(server)
+    assert Agent.get(agent, & &1.http_errors) == 1
+  end
+
+  test "does not retry authentication when the server rate limits it" do
+    {server, agent} = session()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      if conn.method == "POST" do
+        Req.Test.json(conn, %{"Erreur" => %{"G" => 25, "Titre" => "private details"}})
+      else
+        PronoteServer.handle(conn, agent)
+      end
+    end)
+
+    assert {:error, %Error{reason: :rate_limited, code: 25} = error} = Pronote.login(server)
+    refute inspect(error) =~ "private details"
+    assert Agent.get(agent, & &1.logins) == 1
+  end
+
+  test "rejects redirects and never sends credentials to another origin" do
+    {server, agent} = session()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Agent.update(agent, &Map.update(&1, :http_errors, 1, fn n -> n + 1 end))
+
+      conn
+      |> Plug.Conn.put_resp_header("location", "https://other.test/")
+      |> Plug.Conn.send_resp(302, "")
+    end)
+
+    assert {:error, %Error{reason: :http, code: 302}} = Pronote.login(server)
+    assert Agent.get(agent, & &1.http_errors) == 1
+  end
+
+  test "malformed payloads are sanitized, without crashing the session" do
+    {server, _} = session()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("text/html")
+      |> Plug.Conn.send_resp(200, "private malformed body")
+    end)
+
+    assert {:error, %Error{reason: :protocol} = error} = Pronote.login(server)
+    refute inspect(error) =~ "private malformed body"
+    assert :ok = Pronote.logout(server)
+  end
+
+  test "reads homework with the parent signature and filters inclusive due dates" do
+    {server, agent} = session()
+    assert {:ok, [homework]} = Pronote.homework("child-b", ~D[2026-09-15], ~D[2026-09-24], server)
+    assert homework.child_id == "child-b"
+    assert homework.date == ~D[2026-09-17]
+    assert homework.subject == "Français child-b"
+    assert [%{name: "Exercices.pdf", type: :file, url: url}] = homework.resources
+    assert url =~ "https://school.test/pronote/FichiersExternes/"
+    assert url =~ "/Exercices.pdf?Session="
+    assert homework.done
+    assert homework.description == "Lire le chapitre & réviser."
+    assert homework.description =~ "& réviser."
+    refute homework.description =~ "<"
+    refute homework.description =~ "alert"
+    calls = Agent.get(agent, & &1.calls)
+    refute Enum.any?(calls, fn {name, _} -> name == "SaisieTAFFaitEleve" end)
+  end
+
+  test "homework rejects invalid dates without connecting" do
+    {server, agent} = session()
+
+    assert {:error, %Error{reason: :invalid_dates}} =
+             Pronote.homework("child-a", ~D[2026-09-20], ~D[2026-09-14], server)
+
+    assert Agent.get(agent, & &1.logins) == 0
+  end
+
+  test "homework cannot request a different parent's child" do
+    {server, agent} = session()
+
+    assert {:error, %Error{reason: :child_not_found}} =
+             Pronote.homework("unknown", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "PageCahierDeTexte"))
+  end
+
+  test "menus share the encrypted session, span weeks and filter inclusive dates" do
+    {server, agent} = session()
+    assert {:ok, _} = Pronote.children(server)
+    assert {:ok, [menu]} = Pronote.menus("child-b", ~D[2026-09-17], ~D[2026-09-23], server)
+    assert menu.date == ~D[2026-09-21]
+    assert menu.kind == "Déjeuner"
+
+    assert menu.courses == [
+             %{label: "Plats", foods: ["Gratin"]},
+             %{label: "Desserts", foods: ["Pomme"]}
+           ]
+
+    assert Agent.get(agent, & &1.logins) == 1
+
+    assert {:error, %Error{reason: :invalid_dates}} =
+             Pronote.menus("child-b", ~D[2026-09-23], ~D[2026-09-17], server)
+  end
+
+  test "menus respect tab permissions" do
+    {server, _} = session(forbidden: true)
+
+    assert {:error, %Error{reason: :forbidden}} =
+             Pronote.menus("child-a", ~D[2026-09-14], ~D[2026-09-20], server)
+  end
+
+  test "grades use the child signature and period in the existing encrypted session" do
+    {server, agent} = session()
+    assert {:ok, report} = Pronote.grades("child-b", nil, server)
+    assert report.period == "Semestre 1"
+    assert report.periods == ["Semestre 1", "Semestre 2"]
+    assert report.overall == "14,25"
+
+    assert [
+             %{
+               score: "0",
+               out_of: "10",
+               average: "7,5",
+               min: "0",
+               max: "10",
+               subject: "Maths child-b"
+             }
+           ] = report.grades
+
+    assert [%{score: "14,25", average: nil}] = report.averages
+    assert {:ok, %{period: "Semestre 2"}} = Pronote.grades("child-a", "semester2", server)
+    assert Agent.get(agent, & &1.logins) == 1
+    assert {:ok, %{period: "Semestre 1"}} = Pronote.grades("child-a", "Unknown", server)
+  end
+
+  test "grades reject forbidden and unknown children" do
+    {server, _} = session(forbidden: true)
+    assert {:error, %Error{reason: :forbidden}} = Pronote.grades("child-a", nil, server)
+    assert {:error, %Error{reason: :child_not_found}} = Pronote.grades("unknown", nil, server)
+  end
+
+  test "events use the encrypted parent session and filter child recipients" do
+    {server, agent} = session()
+    assert {:ok, a} = Pronote.events("child-a", server)
+    assert Enum.map(a, & &1.title) == ["Événement A", "Événement Commun"]
+    assert hd(a).start == ~N[2026-09-18 12:55:00]
+    assert hd(a).end == ~N[2026-09-18 14:45:00]
+    assert {:ok, b} = Pronote.events("child-b", server)
+    assert Enum.map(b, & &1.title) == ["Événement B", "Événement Commun"]
+    assert Agent.get(agent, & &1.logins) == 1
+    assert {:error, %Error{reason: :child_not_found}} = Pronote.events("unknown", server)
+  end
+
+  test "events respect tab permissions" do
+    {server, _} = session(forbidden: true)
+    assert {:error, %Error{reason: :forbidden}} = Pronote.events("child-a", server)
+  end
+
+  test "student checks and unchecks through a separate session" do
+    {server, agent} = session(student: true)
+    assert {:ok, [_]} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+    assert {:ok, [%{done: false}]} = Pronote.set_homework_done("child-a", "hw-due", false, server)
+    assert {:ok, [%{done: true}]} = Pronote.set_homework_done("child-a", "hw-due", true, server)
+    assert Agent.get(agent, & &1.logins) == 1
+
+    assert {:error, %Error{reason: :stale_homework}} =
+             Pronote.set_homework_done("child-a", "unknown", false, server)
+
+    assert Enum.count(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieTAFFaitEleve")) == 2
+  end
+
+  test "identical homework assignments are distinguished by their Pronote ID" do
+    {server, agent} = session(student: true, duplicate_homework: true)
+    assert {:ok, tasks} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+    assert length(tasks) == 2
+
+    assert {:ok, tasks} = Pronote.set_homework_done("child-a", "hw-due", false, server)
+    assert Enum.find(tasks, &(&1.id == "hw-due")).done == false
+    assert Enum.find(tasks, &(&1.id == "hw-duplicate")).done == true
+    assert Agent.get(agent, & &1.homework_status) == %{{"child-a", "hw-due"} => false}
+
+    assert {:ok, tasks} = Pronote.set_homework_done("child-a", "hw-due", true, server)
+    assert Enum.all?(tasks, & &1.done)
+  end
+
+  test "homework is displayed with the student session ID" do
+    {server, agent} = session(student: true, different_homework_ids: true)
+
+    assert {:ok, [%{id: "student-hw-due", child_id: "child-a"}]} =
+             Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert {:ok, [%{done: false}]} =
+             Pronote.set_homework_done("child-a", "student-hw-due", false, server)
+
+    assert Agent.get(agent, & &1.homework_status) == %{{"child-a", "student-hw-due"} => false}
+  end
+
+  test "identical homework with session-specific IDs updates only the selected assignment" do
+    {server, agent} =
+      session(student: true, duplicate_homework: true, different_homework_ids: true)
+
+    assert {:ok, tasks} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+    assert length(tasks) == 2
+    assert {:ok, tasks} = Pronote.set_homework_done("child-a", "student-hw-due", false, server)
+    assert Enum.find(tasks, &(&1.id == "student-hw-due")).done == false
+    assert Enum.find(tasks, &(&1.id == "student-hw-duplicate")).done == true
+    assert Agent.get(agent, & &1.homework_status) == %{{"child-a", "student-hw-due"} => false}
+    assert {:ok, ^tasks} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert {:error, %Error{reason: :stale_homework}} =
+             Pronote.set_homework_done("child-a", "hw-due", false, server)
+
+    assert Enum.count(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieTAFFaitEleve")) == 1
+  end
+
+  test "an expired student homework session is renewed before the next write" do
+    {server, agent} = session(student: true, different_homework_ids: true)
+    assert {:ok, [_]} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+    Agent.update(agent, &%{&1 | options: Keyword.put(&1.options, :expire_homework, true)})
+    Pronote.clear_cache(server)
+
+    assert {:ok, [task]} = Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+    assert Agent.get(agent, & &1.logins) == 2
+    assert {:ok, [%{done: false}]} = Pronote.set_homework_done("child-a", task.id, false, server)
+    assert Enum.count(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieTAFFaitEleve")) == 1
+  end
+
+  test "unconfirmed writes are errors, not optimistic success" do
+    {server, _} = session(ignore_write: true, student: true)
+    Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert {:error, %Error{reason: :homework_unconfirmed}} =
+             Pronote.set_homework_done("child-a", "hw-due", false, server)
+  end
+
+  test "expired writes are never replayed and stale IDs require a fresh read" do
+    {server, agent} = session(write_error: 10, student: true)
+    Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert {:error, %Error{reason: :session_expired}} =
+             Pronote.set_homework_done("child-a", "hw-due", false, server)
+
+    assert Agent.get(agent, & &1.logins) == 1
+
+    assert {:error, %Error{reason: :stale_homework}} =
+             Pronote.set_homework_done("child-a", "hw-due", false, server)
+
+    assert Enum.count(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieTAFFaitEleve")) == 1
+  end
+
+  test "writes reject malformed statuses before contacting Pronote" do
+    {server, agent} = session()
+
+    assert {:error, %Error{reason: :invalid_homework}} =
+             Pronote.set_homework_done("child-a", "hw-due", "false", server)
+
+    assert Agent.get(agent, & &1.logins) == 0
+  end
+
+  test "missing student credentials never send a parent write" do
+    {server, agent} = session()
+    Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert {:error, %Error{reason: :student_credentials_required}} =
+             Pronote.set_homework_done("child-a", "hw-due", false, server)
+
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieTAFFaitEleve"))
+  end
+
+  test "wrong student identity prevents the write" do
+    {server, agent} = session(student: true, wrong_student: true)
+
+    assert {:error, %Error{reason: :student_mismatch}} =
+             Pronote.homework("child-a", ~D[2026-09-15], ~D[2026-09-24], server)
+
+    assert {:error, %Error{reason: :stale_homework}} =
+             Pronote.set_homework_done("child-a", "hw-due", false, server)
+
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieTAFFaitEleve"))
+  end
+end

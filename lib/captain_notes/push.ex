@@ -1,0 +1,611 @@
+defmodule CaptainNotes.Push do
+  @moduledoc "Durable Web Push subscriptions, observation baselines and per-device delivery queue."
+  import Ecto.Query
+  require Logger
+  alias CaptainNotes.{Accounts, Repo}
+  alias CaptainNotes.Push.{Baseline, Delivery, Setting, Subscription}
+
+  def configure do
+    # Keep the server identity with the database: container replacement must not
+    # invalidate every installed PWA's subscription.
+    {:ok, keys} =
+      Repo.transaction(fn ->
+        case Repo.get(Setting, "vapid") do
+          nil ->
+            keys = WebPush.Vapid.generate_keypair() |> Map.new(fn {k, v} -> {to_string(k), v} end)
+            Repo.insert!(%Setting{key: "vapid", value: keys}).value
+
+          setting ->
+            setting.value
+        end
+      end)
+
+    subject =
+      Application.get_env(:captain_notes, :push_subject) ||
+        "https://" <>
+          to_string(
+            Application.get_env(:captain_notes, CaptainNotesWeb.Endpoint)[:url][:host] ||
+              "localhost"
+          )
+
+    Application.put_env(:web_push, :vapid,
+      public_key: keys["public_key"],
+      private_key: keys["private_key"],
+      subject: subject
+    )
+
+    :ok
+  end
+
+  def public_key, do: WebPush.Vapid.public_key()
+
+  def subscribe(account_id, params) do
+    with account when not is_nil(account) <- Accounts.get(account_id),
+         {:ok, sub} <- WebPush.Subscription.from_map(params),
+         true <- valid_endpoint?(sub.endpoint),
+         true <- valid_keys?(sub.p256dh, sub.auth) do
+      Repo.transaction(fn ->
+        # An endpoint belongs to a single login profile; switching profile drops
+        # queued notifications for the previous one.
+        if old = Repo.get_by(Subscription, endpoint: sub.endpoint), do: Repo.delete!(old)
+
+        Repo.insert!(%Subscription{
+          account_id: account.id,
+          account_fingerprint: Accounts.fingerprint(account.id),
+          endpoint: sub.endpoint,
+          p256dh: sub.p256dh,
+          auth: sub.auth
+        })
+      end)
+    else
+      _ -> {:error, :invalid_subscription}
+    end
+  end
+
+  def subscription(id, account_id) when is_integer(id) do
+    fingerprint = Accounts.fingerprint(account_id)
+
+    case Repo.get(Subscription, id) do
+      %Subscription{account_id: ^account_id, account_fingerprint: ^fingerprint} = sub -> sub
+      _ -> nil
+    end
+  end
+
+  def subscription(_, _), do: nil
+
+  def unsubscribe(id) when is_integer(id) do
+    Repo.delete_all(from(s in Subscription, where: s.id == ^id))
+    :ok
+  end
+
+  def unsubscribe(_), do: :ok
+
+  def valid_endpoint?(endpoint) when is_binary(endpoint) and byte_size(endpoint) <= 4096 do
+    case URI.parse(endpoint) do
+      %URI{scheme: "https", host: host, port: 443, userinfo: nil, fragment: nil}
+      when is_binary(host) ->
+        host == "fcm.googleapis.com" or host == "updates.push.services.mozilla.com" or
+          String.ends_with?(host, ".push.services.mozilla.com") or
+          host == "web.push.apple.com" or String.ends_with?(host, ".push.apple.com") or
+          host == "wns2-par02p.notify.windows.com" or
+          String.ends_with?(host, ".notify.windows.com")
+
+      _ ->
+        false
+    end
+  end
+
+  def valid_endpoint?(_), do: false
+
+  defp valid_keys?(public, auth) do
+    with {:ok, <<4, _::binary-size(64)>> = point} <- Base.url_decode64(public, padding: false),
+         {:ok, <<_::binary-size(16)>>} <- Base.url_decode64(auth, padding: false) do
+      # Validate the curve point before saving client-controlled input.
+      {_, private} = :crypto.generate_key(:ecdh, :prime256v1)
+      :crypto.compute_key(:ecdh, point, private, :prime256v1)
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  @doc "Observe a successful fresh read. The first observation establishes a silent baseline."
+  def observe(account_id, context, child, report, now \\ DateTime.utc_now()) do
+    if Accounts.get(account_id) do
+      fingerprint = Accounts.fingerprint(account_id)
+      # Resource IDs change on PRONOTE reconnect. Use the authenticated profile,
+      # school and full child name instead; never share subscriptions across profiles.
+      key =
+        digest(
+          {account_id, fingerprint, context.school_url, context.school_year, context.period,
+           normalize(child.name), normalize(Map.get(child, :school_name) || "")}
+        )
+
+      # Counts per evaluation date + subject survive ID rotations, score/comment
+      # corrections, list reordering and disappearing/reappearing evaluations.
+      # Keep the largest observed count, rather than treating a reappearance as new.
+      counts = Enum.frequencies_by(report.grades, &digest({&1.date, normalize(&1.subject)}))
+
+      Repo.transaction(fn ->
+        previous = Repo.get(Baseline, key)
+
+        added =
+          if previous,
+            do:
+              Enum.reduce(counts, 0, fn {k, n}, acc ->
+                acc + max(n - Map.get(previous.counts, k, 0), 0)
+              end),
+            else: 0
+
+        merged =
+          Map.merge((previous && previous.counts) || %{}, counts, fn _, a, b -> max(a, b) end)
+
+        Repo.insert!(%Baseline{key: key, counts: merged},
+          on_conflict: [set: [counts: merged]],
+          conflict_target: :key
+        )
+
+        if added > 0 do
+          enqueue_grades(account_id, fingerprint, child, context.period, now)
+        end
+
+        added
+      end)
+      |> activate_banner(account_id, "grades", grade_url(child, context.period))
+    else
+      {:ok, 0}
+    end
+  end
+
+  @doc "Remembers upcoming cancellations and queues only those first observed on their lesson day."
+  def observe_cancellations(account_id, context, child, lessons, now \\ DateTime.utc_now()) do
+    if Accounts.get(account_id) do
+      local_now = local_datetime(now)
+      today = NaiveDateTime.to_date(local_now)
+      fingerprint = Accounts.fingerprint(account_id)
+
+      key_for_day = fn day ->
+        digest(
+          {:cancellations, account_id, fingerprint, context.school_url, context.school_year,
+           normalize(child.name), normalize(Map.get(child, :school_name) || ""), day}
+        )
+      end
+
+      cancellations_by_day =
+        lessons
+        |> CaptainNotes.Agenda.without_replaced_cancellations()
+        |> Enum.filter(&(&1.canceled && NaiveDateTime.compare(&1.end, local_now) == :gt))
+        |> Enum.group_by(&NaiveDateTime.to_date(&1.start))
+        |> Map.new(fn {day, lessons} ->
+          {day, Map.new(lessons, &{digest({&1.start, normalize(&1.subject || "")}), 1})}
+        end)
+
+      key = key_for_day.(today)
+      cancellations = Map.get(cancellations_by_day, today, %{})
+
+      Repo.transaction(fn ->
+        # Keep the existing per-lesson-day keys so deployed baselines stay valid.
+        # Remember future cancellations silently before their day becomes today.
+        for {day, counts} <- cancellations_by_day, Date.compare(day, today) == :gt do
+          future_key = key_for_day.(day)
+          previous = Repo.get(Baseline, future_key)
+          merged = Map.merge((previous && previous.counts) || %{}, counts)
+
+          Repo.insert!(%Baseline{key: future_key, counts: merged},
+            on_conflict: [set: [counts: merged]],
+            conflict_target: :key
+          )
+        end
+
+        previous = Repo.get(Baseline, key)
+        seen = (previous && previous.counts) || %{}
+        added = map_size(Map.drop(cancellations, Map.keys(seen)))
+        merged = Map.merge(seen, cancellations)
+
+        if map_size(merged) > 0 do
+          Logger.info(fn ->
+            snapshot =
+              lessons
+              |> Enum.filter(&(NaiveDateTime.to_date(&1.start) == today))
+              |> Enum.map(fn lesson ->
+                %{
+                  key: digest({lesson.start, normalize(lesson.subject || "")}),
+                  subject: lesson.subject,
+                  start: lesson.start,
+                  end: lesson.end,
+                  canceled: lesson.canceled,
+                  overlaps_active:
+                    lesson.canceled &&
+                      Enum.any?(lessons, fn other ->
+                        !other.canceled && NaiveDateTime.compare(lesson.start, other.end) == :lt &&
+                          NaiveDateTime.compare(other.start, lesson.end) == :lt
+                      end)
+                }
+              end)
+
+            "Cancellation observation " <>
+              inspect(
+                %{
+                  observation: key,
+                  account: account_id,
+                  child: child_slug(child),
+                  local_now: local_now,
+                  new_keys: Map.keys(Map.drop(cancellations, Map.keys(seen))),
+                  seen_keys: Map.keys(seen),
+                  lessons: snapshot
+                },
+                limit: :infinity
+              )
+          end)
+        end
+
+        Repo.insert!(%Baseline{key: key, counts: merged},
+          on_conflict: [set: [counts: merged]],
+          conflict_target: :key
+        )
+
+        if added > 0 do
+          name = CaptainNotes.Family.first_name(child)
+          midnight = NaiveDateTime.new!(Date.add(today, 1), ~T[00:00:00])
+          [utc | _] = :calendar.local_time_to_universal_time_dst(NaiveDateTime.to_erl(midnight))
+          expires_at = utc |> NaiveDateTime.from_erl!({0, 6}) |> DateTime.from_naive!("Etc/UTC")
+
+          payload = %{
+            "title" => "Annulation de cours",
+            "kind" => "cancellation",
+            "body" => "Voir l'agenda de #{name}",
+            "url" => "/#{child_slug(child)}",
+            "tag" => "cancellations-" <> Ecto.UUID.generate()
+          }
+
+          queued = enqueue(account_id, fingerprint, payload, now, expires_at)
+
+          Logger.info(
+            "Cancellation queued " <>
+              inspect(%{
+                observation: key,
+                tag: payload["tag"],
+                devices: queued,
+                expires_at: expires_at
+              })
+          )
+        end
+
+        added
+      end)
+      |> activate_banner(account_id, "cancellation", "/#{child_slug(child)}")
+    else
+      {:ok, 0}
+    end
+  end
+
+  @doc "Observe only the profile's own inbox; initial reads establish a silent baseline."
+  def observe_messages(
+        account_id,
+        context,
+        mailbox,
+        child,
+        discussions,
+        now \\ DateTime.utc_now()
+      ) do
+    case Accounts.get(account_id) do
+      %{role: role} when role == mailbox and role in [:parent, :child] ->
+        fingerprint = Accounts.fingerprint(account_id)
+
+        key =
+          digest({:messages, account_id, fingerprint, context.school_url, context.school_year})
+
+        observations =
+          Enum.flat_map(discussions, fn discussion ->
+            kind = Map.get(discussion, :kind, :discussion)
+
+            if kind == :discussion do
+              discussion.messages
+              |> Enum.reject(&Map.get(&1, :own, false))
+              |> Enum.map(fn message ->
+                {digest(
+                   {kind, normalize(discussion.subject), normalize(message.author), message.date}
+                 ), !Map.get(message, :seen, discussion.unread == 0)}
+              end)
+            else
+              [
+                {digest(
+                   {kind, normalize(discussion.subject), normalize(discussion.author),
+                    discussion.date}
+                 ), discussion.unread > 0}
+              ]
+            end
+          end)
+
+        counts = Enum.frequencies_by(observations, &elem(&1, 0))
+        unread = observations |> Enum.filter(&elem(&1, 1)) |> MapSet.new(&elem(&1, 0))
+
+        Repo.transaction(fn ->
+          previous = Repo.get(Baseline, key)
+          seen = (previous && previous.counts) || %{}
+
+          added =
+            if previous do
+              Enum.reduce(counts, 0, fn {key, count}, total ->
+                total +
+                  if(MapSet.member?(unread, key),
+                    do: max(count - Map.get(seen, key, 0), 0),
+                    else: 0
+                  )
+              end)
+            else
+              0
+            end
+
+          merged = Map.merge(seen, counts, fn _, a, b -> max(a, b) end)
+
+          Repo.insert!(%Baseline{key: key, counts: merged},
+            on_conflict: [set: [counts: merged]],
+            conflict_target: :key
+          )
+
+          if added > 0 do
+            section = if role == :parent, do: "parent-messages", else: "messages"
+
+            payload = %{
+              "title" => "Nouveau message",
+              "body" => "Voir mes messages",
+              "kind" => "messages",
+              "url" => "/#{child_slug(child)}/#{section}",
+              "tag" => "messages-" <> Ecto.UUID.generate()
+            }
+
+            enqueue(account_id, fingerprint, payload, now, DateTime.add(now, 86400, :second))
+          end
+
+          added
+        end)
+
+      _ ->
+        {:ok, 0}
+    end
+  end
+
+  defp activate_banner({:ok, added} = result, account_id, kind, url) when added > 0 do
+    CaptainNotes.Pronote.ReadCache.invalidate(
+      {:kind, if(kind == "grades", do: :grades, else: :lessons)}
+    )
+
+    CaptainNotes.NotificationBanners.activate(account_id, kind, url)
+    result
+  end
+
+  defp activate_banner(result, _account_id, _kind, _url), do: result
+
+  defp local_datetime(now) do
+    now
+    |> DateTime.to_naive()
+    |> NaiveDateTime.to_erl()
+    |> :calendar.universal_time_to_local_time()
+    |> NaiveDateTime.from_erl!()
+  end
+
+  @doc """
+  Manually queues a grades notification for one child of a configured profile.
+
+      CaptainNotes.Push.notify_grades("family", "Edgar")
+      CaptainNotes.Push.notify_grades("family", "Edgar", period: "semester1")
+
+  Resolves the child by first or full name (case-insensitive) through that
+  profile's PRONOTE session. Does not fetch or modify grades, history or baselines.
+  Returns `{:ok, %{queued: count}}`, not a delivery receipt. Errors include
+  `:unknown_account`, `:child_not_found`, `:ambiguous_child`, `:no_subscriptions`
+  and `:pronote_unavailable`. Each explicit call creates a new notification.
+  """
+  def notify_grades(account_id, child_name, options \\ []) when is_binary(child_name) do
+    with account when not is_nil(account) <- Accounts.get(account_id),
+         {:ok, children} <- notification_children(account.id, options),
+         {:ok, child} <- notification_child(children, child_name) do
+      result =
+        Repo.transaction(fn ->
+          count =
+            enqueue_grades(
+              account.id,
+              Accounts.fingerprint(account.id),
+              child,
+              Keyword.get(options, :period),
+              DateTime.utc_now()
+            )
+
+          if count == 0, do: Repo.rollback(:no_subscriptions)
+          %{queued: count}
+        end)
+
+      if match?({:ok, _}, result), do: CaptainNotes.Push.Worker.deliver_now()
+      result
+    else
+      nil -> {:error, :unknown_account}
+      error -> error
+    end
+  end
+
+  defp notification_children(account_id, options) do
+    server =
+      Keyword.get_lazy(options, :server, fn ->
+        CaptainNotes.Pronote.Session.for_account(account_id)
+      end)
+
+    case CaptainNotes.Pronote.children(server) do
+      {:ok, children} -> {:ok, children}
+      _ -> {:error, :pronote_unavailable}
+    end
+  rescue
+    _ in CaptainNotes.Pronote.Error -> {:error, :pronote_unavailable}
+  catch
+    :exit, _ -> {:error, :pronote_unavailable}
+  end
+
+  defp notification_child(children, name) do
+    matches =
+      Enum.filter(children, fn child ->
+        normalize(name) in [
+          normalize(child.name),
+          normalize(CaptainNotes.Family.first_name(child))
+        ]
+      end)
+
+    case matches do
+      [child] -> {:ok, child}
+      [] -> {:error, :child_not_found}
+      _ -> {:error, :ambiguous_child}
+    end
+  end
+
+  defp enqueue_grades(account_id, fingerprint, child, period, now) do
+    name = CaptainNotes.Family.first_name(child)
+
+    payload = %{
+      "title" => "Nouvelles notes",
+      "kind" => "grades",
+      "body" => "Voir les notes de #{name}",
+      "url" => grade_url(child, period),
+      "tag" => "grades-" <> Ecto.UUID.generate()
+    }
+
+    enqueue(account_id, fingerprint, payload, now, DateTime.add(now, 86400, :second))
+  end
+
+  defp grade_url(child, period) do
+    "/#{child_slug(child)}/notes" <>
+      if(period, do: "?" <> URI.encode_query(%{"period" => period}), else: "")
+  end
+
+  defp child_slug(child) do
+    child
+    |> CaptainNotes.Family.first_name()
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace(~r/\s+/u, "-")
+    |> URI.encode(&URI.char_unreserved?/1)
+  end
+
+  defp enqueue(account_id, fingerprint, payload, now, expires_at) do
+    Repo.all(
+      from(s in Subscription,
+        where: s.account_id == ^account_id and s.account_fingerprint == ^fingerprint
+      )
+    )
+    |> Enum.map(fn sub ->
+      Repo.insert!(%Delivery{
+        subscription_id: sub.id,
+        payload: payload,
+        due_at: now,
+        expires_at: expires_at
+      })
+    end)
+    |> length()
+  end
+
+  def deliver_pending(sender \\ &CaptainNotes.Push.Sender.send/2, now \\ DateTime.utc_now()) do
+    Repo.delete_all(from(d in Delivery, where: d.expires_at <= ^now))
+    deliveries = Repo.all(from(d in Delivery, where: d.due_at <= ^now, order_by: d.id, limit: 20))
+
+    Enum.each(deliveries, fn delivery ->
+      case Repo.get(Subscription, delivery.subscription_id) do
+        nil ->
+          Repo.delete!(delivery)
+
+        sub ->
+          if Accounts.get(sub.account_id) &&
+               sub.account_fingerprint == Accounts.fingerprint(sub.account_id) do
+            invalidate_notification_cache(delivery.payload)
+
+            result =
+              try do
+                payload =
+                  Map.put(delivery.payload, "badge", CaptainNotes.AppBadge.count(sub.account_id))
+
+                sender.(sub, payload)
+              rescue
+                _ -> {:error, :send_failed}
+              end
+
+            if String.starts_with?(delivery.payload["tag"] || "", "cancellations-") do
+              outcome =
+                case result do
+                  :ok -> :sent
+                  {:error, :gone} -> :subscription_gone
+                  _ -> :failed
+                end
+
+              Logger.info(
+                "Cancellation delivery " <>
+                  inspect(%{
+                    tag: delivery.payload["tag"],
+                    delivery: delivery.id,
+                    subscription: sub.id,
+                    attempt: delivery.attempts + 1,
+                    outcome: outcome
+                  })
+              )
+            end
+
+            case result do
+              :ok ->
+                Repo.delete!(delivery)
+
+              {:error, :gone} ->
+                Repo.delete!(sub)
+
+              _ ->
+                attempts = delivery.attempts + 1
+
+                if attempts >= 8 do
+                  Repo.delete!(delivery)
+                else
+                  delay = min(30 * Integer.pow(2, attempts), 3600)
+
+                  delivery
+                  |> Ecto.Changeset.change(
+                    attempts: attempts,
+                    due_at: DateTime.add(now, delay, :second)
+                  )
+                  |> Repo.update!()
+                end
+            end
+          else
+            Repo.delete!(sub)
+          end
+      end
+    end)
+
+    :ok
+  end
+
+  # Invalidate before sending: a device can open the notification immediately.
+  # Other family profiles may hold the same data under different PRONOTE IDs.
+  defp invalidate_notification_cache(payload) do
+    kind =
+      case payload["kind"] do
+        "grades" ->
+          :grades
+
+        "cancellation" ->
+          :lessons
+
+        "messages" ->
+          if(String.ends_with?(payload["url"], "/parent-messages"),
+            do: :parent_discussions,
+            else: :discussions
+          )
+
+        _ ->
+          nil
+      end
+
+    if kind, do: CaptainNotes.Pronote.ReadCache.invalidate({:kind, kind})
+  end
+
+  defp normalize(value),
+    do: value |> String.downcase() |> String.normalize(:nfc) |> String.split() |> Enum.join(" ")
+
+  defp digest(term),
+    do: :crypto.hash(:sha256, :erlang.term_to_binary(term)) |> Base.url_encode64(padding: false)
+end
