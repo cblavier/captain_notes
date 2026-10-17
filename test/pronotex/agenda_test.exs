@@ -106,6 +106,94 @@ defmodule Pronotex.AgendaTest do
     assert fourth.pauses_before == [%{start: third.end, end: fourth.start, label: "Pause"}]
   end
 
+  describe "school holidays" do
+    test "recognizes school labels without guessing from the month" do
+      for {title, kind} <- [
+            {"Vacances de la Toussaint", :autumn},
+            {"VACANCES D’AUTOMNE", :autumn},
+            {"Vacances de Noël", :christmas},
+            {"Congés de NOEL", :christmas},
+            {"Vacances d’hiver", :winter},
+            {"Vacances de février", :winter},
+            {"Vacances de Pâques", :spring},
+            {"Vacances de printemps (zone B)", :spring},
+            {"Vacances d'été", :summer},
+            {"Grandes vacances", :summer}
+          ] do
+        event = holiday_event(title, ~N[2026-10-18 00:00:00], ~N[2026-11-01 00:00:00])
+
+        assert Agenda.holiday([event], ~D[2026-10-19], ~D[2026-10-23]) == %{
+                 kind: kind,
+                 return_date: ~D[2026-11-02]
+               }
+      end
+    end
+
+    test "uses the event dates, including year changes and a midweek return" do
+      for {title, first, last, from, to, kind, resume} <- [
+            {"Vacances de Noël", ~N[2026-12-20 00:00:00], ~N[2027-01-03 00:00:00], ~D[2026-12-28],
+             ~D[2027-01-01], :christmas, ~D[2027-01-04]},
+            {"Vacances d'hiver", ~N[2027-02-14 00:00:00], ~N[2027-03-01 00:00:00], ~D[2027-02-22],
+             ~D[2027-02-26], :winter, ~D[2027-03-01]},
+            {"Vacances de printemps", ~N[2027-04-11 00:00:00], ~N[2027-04-25 23:59:59],
+             ~D[2027-04-19], ~D[2027-04-23], :spring, ~D[2027-04-26]},
+            {"Vacances d'été", ~N[2027-07-04 00:00:00], ~N[2027-09-02 00:00:00], ~D[2027-08-23],
+             ~D[2027-08-27], :summer, ~D[2027-09-02]}
+          ] do
+        assert Agenda.holiday([holiday_event(title, first, last)], from, to) == %{
+                 kind: kind,
+                 return_date: resume
+               }
+      end
+    end
+
+    test "requires a known holiday covering the whole displayed range" do
+      event =
+        holiday_event(
+          "Vacances de la Toussaint",
+          ~N[2026-10-18 00:00:00],
+          ~N[2026-11-01 00:00:00]
+        )
+
+      assert Agenda.holiday([event], ~D[2026-10-26], ~D[2026-10-30])
+      refute Agenda.holiday([event], ~D[2026-10-12], ~D[2026-10-16])
+      refute Agenda.holiday([event], ~D[2026-11-02], ~D[2026-11-06])
+
+      refute Agenda.holiday(
+               [%{event | start: ~N[2026-10-21 00:00:00]}],
+               ~D[2026-10-19],
+               ~D[2026-10-23]
+             )
+
+      refute Agenda.holiday([event], ~D[2026-10-23], ~D[2026-10-19])
+
+      for title <- [
+            nil,
+            "Vacances",
+            "Pont de l'Ascension",
+            "Sortie de la Toussaint",
+            "Spectacle de Noël",
+            "Réunion de printemps"
+          ] do
+        refute Agenda.holiday([%{event | title: title}], ~D[2026-10-19], ~D[2026-10-23])
+      end
+
+      for invalid <- [
+            %{event | end: nil},
+            %{event | start: nil},
+            %{event | end: event.start},
+            %{event | end: ~N[2026-10-01 00:00:00]}
+          ] do
+        refute Agenda.holiday([invalid], ~D[2026-10-19], ~D[2026-10-23])
+      end
+
+      refute Agenda.holiday([], ~D[2026-10-19], ~D[2026-10-23])
+    end
+  end
+
+  defp holiday_event(title, first, last),
+    do: %Pronotex.Pronote.Event{title: title, start: first, end: last}
+
   defp lesson(id, from, to, canceled \\ false) do
     %Lesson{
       id: id,

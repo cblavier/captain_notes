@@ -47,6 +47,14 @@ defmodule PronotexWeb.DashboardLiveTest do
     def lessons(id, from, to) do
       mode = Application.get_env(:pronotex, :dashboard_test_mode)
 
+      if (mode == :toussaint && Date.compare(from, ~D[2026-11-02]) == :lt) || mode == :holiday do
+        {:ok, []}
+      else
+        holiday_lessons(id, from, to, mode)
+      end
+    end
+
+    defp holiday_lessons(id, from, to, mode) do
       if mode == :slow_timetable and from == ~D[2026-09-21] do
         notify({:timetable_pending, self()})
 
@@ -147,7 +155,7 @@ defmodule PronotexWeb.DashboardLiveTest do
       end
 
       case Application.get_env(:pronotex, :dashboard_test_mode) do
-        :empty ->
+        mode when mode in [:empty, :holiday, :holiday_events_failure] ->
           {:ok, []}
 
         :upcoming ->
@@ -390,6 +398,20 @@ defmodule PronotexWeb.DashboardLiveTest do
       notify({:events, id})
 
       case Application.get_env(:pronotex, :dashboard_test_mode) do
+        :holiday ->
+          {:ok, [Application.fetch_env!(:pronotex, :dashboard_test_holiday)]}
+
+        mode when mode in [:toussaint, :toussaint_with_lessons] ->
+          {:ok,
+           [
+             %Pronotex.Pronote.Event{
+               id: "toussaint",
+               title: "Vacances de la Toussaint",
+               start: ~N[2026-10-18 00:00:00],
+               end: ~N[2026-11-01 00:00:00]
+             }
+           ]}
+
         :empty ->
           {:ok, []}
 
@@ -411,7 +433,7 @@ defmodule PronotexWeb.DashboardLiveTest do
         :inaccessible_child ->
           {:error, Pronotex.Pronote.Error.new(:child_not_found)}
 
-        :events_failure ->
+        mode when mode in [:events_failure, :holiday_events_failure] ->
           {:error, Pronotex.Pronote.Error.new(:forbidden)}
 
         _ ->
@@ -432,7 +454,7 @@ defmodule PronotexWeb.DashboardLiveTest do
       notify({:menus, id, from, to})
 
       case Application.get_env(:pronotex, :dashboard_test_mode) do
-        :empty ->
+        mode when mode in [:empty, :holiday, :holiday_events_failure] ->
           {:ok, []}
 
         :failure ->
@@ -560,7 +582,15 @@ defmodule PronotexWeb.DashboardLiveTest do
       end
     end
 
-    keys = [:pronote_client, :dashboard_test_pid, :dashboard_test_mode, :today, :now]
+    keys = [
+      :pronote_client,
+      :dashboard_test_pid,
+      :dashboard_test_mode,
+      :dashboard_test_holiday,
+      :today,
+      :now
+    ]
+
     previous = Map.new(keys, &{&1, Application.fetch_env(:pronotex, &1)})
     Application.put_env(:pronotex, :today, fn -> ~D[2026-09-18] end)
     Application.put_env(:pronotex, :now, fn -> ~N[2026-09-18 12:00:00] end)
@@ -576,6 +606,180 @@ defmodule PronotexWeb.DashboardLiveTest do
     end)
 
     :ok
+  end
+
+  test "Toussaint placeholder navigates to the return week and preserves the child", %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :toussaint)
+    {:ok, view, _} = live(conn, "/basile?week=2026-10-19")
+    render_async(view)
+    assert has_element?(view, "#school-holiday h3", "C'est les vacances")
+
+    assert has_element?(
+             view,
+             "#school-holiday time[datetime='2026-11-02']",
+             "lundi 2 novembre"
+           )
+
+    refute has_element?(view, "#no-lessons")
+    view |> element("#holiday-return") |> render_click()
+    assert_patch(view, "/basile?week=2026-11-02")
+    render_async(view)
+    refute has_element?(view, "#school-holiday")
+    assert has_element?(view, "#lesson-days", "Maths b")
+  end
+
+  test "Toussaint placeholder also replaces the empty daily agenda", %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :toussaint)
+    Application.put_env(:pronotex, :today, fn -> ~D[2026-10-20] end)
+    Application.put_env(:pronotex, :now, fn -> ~N[2026-10-20 10:00:00] end)
+    {:ok, view, _} = live(conn, "/alice")
+    render_async(view)
+    assert has_element?(view, "#school-holiday")
+    refute has_element?(view, "#no-lessons-today")
+  end
+
+  test "Toussaint event does not hide actual lessons", %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :toussaint_with_lessons)
+    {:ok, view, _} = live(conn, "/alice?week=2026-10-19")
+    render_async(view)
+    refute has_element?(view, "#school-holiday")
+    assert has_element?(view, "#lesson-days", "Maths a")
+  end
+
+  test "each holiday illustration navigates using the dates supplied by Pronote", %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :holiday)
+
+    for {title, first, last, week, return_week, kind} <- [
+          {"Vacances de Noël", ~N[2026-12-20 00:00:00], ~N[2027-01-03 00:00:00], "2026-12-28",
+           "2027-01-04", "christmas"},
+          {"Vacances d'hiver", ~N[2027-02-14 00:00:00], ~N[2027-02-28 00:00:00], "2027-02-15",
+           "2027-03-01", "winter"},
+          {"Vacances de printemps", ~N[2027-04-11 00:00:00], ~N[2027-04-25 00:00:00],
+           "2027-04-12", "2027-04-26", "spring"},
+          {"Grandes vacances", ~N[2027-07-04 00:00:00], ~N[2027-09-02 00:00:00], "2027-07-05",
+           "2027-08-30", "summer"}
+        ] do
+      Application.put_env(:pronotex, :dashboard_test_holiday, %Pronotex.Pronote.Event{
+        id: "holiday",
+        title: title,
+        start: first,
+        end: last
+      })
+
+      {:ok, view, _} = live(conn, "/alice?week=#{week}")
+      render_async(view)
+      assert has_element?(view, "#school-holiday [data-illustration='#{kind}']")
+      refute has_element?(view, "#no-lessons")
+      view |> element("#holiday-return") |> render_click()
+      assert_patch(view, "/alice?week=#{return_week}")
+      render_async(view)
+      refute has_element?(view, "#school-holiday")
+    end
+  end
+
+  test "unknown or incomplete holidays use the shared generic placeholder", %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :holiday)
+
+    for event <- [
+          %Pronotex.Pronote.Event{
+            id: "unknown",
+            title: "Vacances",
+            start: ~N[2026-10-18 00:00:00],
+            end: ~N[2026-11-01 00:00:00]
+          },
+          %Pronotex.Pronote.Event{
+            id: "incomplete",
+            title: "Vacances de la Toussaint",
+            start: ~N[2026-10-18 00:00:00]
+          }
+        ] do
+      Application.put_env(:pronotex, :dashboard_test_holiday, event)
+      {:ok, view, _} = live(conn, "/alice?week=2026-10-19")
+      render_async(view)
+      refute has_element?(view, "#school-holiday")
+      refute has_element?(view, "#holiday-return")
+      assert has_element?(view, "#no-lessons [data-illustration='default']")
+    end
+  end
+
+  test "empty homework and menu pages share the holiday illustration and keep their section on return",
+       %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :holiday)
+
+    Application.put_env(:pronotex, :dashboard_test_holiday, %Pronotex.Pronote.Event{
+      id: "christmas",
+      title: "Vacances de Noël",
+      start: ~N[2026-12-20 00:00:00],
+      end: ~N[2027-01-03 00:00:00]
+    })
+
+    for {path, container, empty} <- [
+          {"devoirs", "#homework-content", "#no-homework"},
+          {"menu", "#canteen-content", "#no-menus"}
+        ] do
+      {:ok, view, _} = live(conn, "/basile/#{path}?week=2026-12-21")
+      render_async(view)
+      assert has_element?(view, "#{container} #school-holiday[data-holiday='christmas']")
+
+      assert render(view)
+             |> LazyHTML.from_document()
+             |> LazyHTML.query("#school-holiday")
+             |> Enum.count() == 1
+
+      refute has_element?(view, empty)
+      view |> element("#holiday-return") |> render_click()
+      assert_patch(view, "/basile/#{path}?week=2027-01-04")
+      render_async(view)
+      refute has_element?(view, "#school-holiday")
+      assert has_element?(view, empty)
+    end
+  end
+
+  test "holiday metadata never hides homework or menus", %{conn: conn} do
+    Application.put_env(:pronotex, :dashboard_test_mode, :toussaint_with_lessons)
+
+    for {path, content} <- [{"devoirs", "#homework-days"}, {"menu", "#menu-days"}] do
+      {:ok, view, _} = live(conn, "/alice/#{path}?week=2026-10-19")
+      render_async(view)
+      refute has_element?(view, "#school-holiday")
+      assert has_element?(view, "#{content} > section")
+    end
+  end
+
+  test "daily homework and menus require the entire next seven days to be on holiday", %{
+    conn: conn
+  } do
+    Application.put_env(:pronotex, :dashboard_test_mode, :holiday)
+
+    Application.put_env(:pronotex, :dashboard_test_holiday, %Pronotex.Pronote.Event{
+      id: "toussaint",
+      title: "Vacances de la Toussaint",
+      start: ~N[2026-10-18 00:00:00],
+      end: ~N[2026-11-01 00:00:00]
+    })
+
+    for {today, on_holiday?} <- [{~D[2026-10-20], true}, {~D[2026-10-30], false}],
+        path <- ["devoirs", "menu"] do
+      Application.put_env(:pronotex, :today, fn -> today end)
+      Application.put_env(:pronotex, :now, fn -> NaiveDateTime.new!(today, ~T[10:00:00]) end)
+      {:ok, view, _} = live(conn, "/alice/#{path}")
+      render_async(view)
+      assert has_element?(view, "#school-holiday") == on_holiday?
+    end
+  end
+
+  test "unavailable holiday metadata does not show an unrelated error on homework or menus", %{
+    conn: conn
+  } do
+    Application.put_env(:pronotex, :dashboard_test_mode, :holiday_events_failure)
+
+    for {path, empty} <- [{"devoirs", "#no-homework"}, {"menu", "#no-menus"}] do
+      {:ok, view, _} = live(conn, "/alice/#{path}?week=2026-10-19")
+      render_async(view)
+      assert has_element?(view, empty)
+      refute has_element?(view, "#school-holiday")
+      refute has_element?(view, "#flash-error")
+    end
   end
 
   test "server banners are shared across devices and their buttons use live patches", %{
@@ -1819,7 +2023,9 @@ defmodule PronotexWeb.DashboardLiveTest do
     assert has_element?(view, "#flash-error", "Cet enfant")
   end
 
-  test "upcoming events load with agenda and stay independent of the selected week", %{conn: conn} do
+  test "events load for agenda, homework and menus, independently of the selected week", %{
+    conn: conn
+  } do
     {:ok, view, _} = live(conn, "/alice?week=2026-09-21")
     render_async(view)
     assert has_element?(view, "#upcoming-events", "Réunion a")
@@ -1833,6 +2039,12 @@ defmodule PronotexWeb.DashboardLiveTest do
     refute has_element?(view, "#upcoming-events", "Réunion a")
     assert_receive {:events, "b"}
     view |> element("#nav-devoirs") |> render_click()
+    render_async(view)
+    assert_receive {:events, "b"}
+    view |> element("#nav-cantine") |> render_click()
+    render_async(view)
+    assert_receive {:events, "b"}
+    view |> element("#nav-notes") |> render_click()
     render_async(view)
     refute_received {:events, _}
   end

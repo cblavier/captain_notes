@@ -1,6 +1,7 @@
 defmodule PronotexWeb.DashboardLive do
   use PronotexWeb, :live_view
   import PronotexWeb.TimetableComponents
+  import PronotexWeb.EmptyStateComponents
   import PronotexWeb.ContentComponents
   import PronotexWeb.MessageComponents
 
@@ -60,6 +61,7 @@ defmodule PronotexWeb.DashboardLive do
         error: nil,
         event_error: nil,
         event_count: 0,
+        holiday: nil,
         remaining_events: [],
         lesson_error: nil,
         homework_writable: false,
@@ -395,6 +397,19 @@ defmodule PronotexWeb.DashboardLive do
      )}
   end
 
+  def handle_event("holiday-return", _, socket) do
+    case socket.assigns.holiday do
+      %{return_date: date} ->
+        {:noreply,
+         push_patch(socket,
+           to: selection_url(socket, mode: :week, week: Date.beginning_of_week(date))
+         )}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("today", _, socket) do
     {:noreply, push_patch(socket, to: selection_url(socket, mode: :today, week: today()))}
   end
@@ -678,6 +693,7 @@ defmodule PronotexWeb.DashboardLive do
       error: nil,
       event_error: nil,
       event_count: 0,
+      holiday: nil,
       remaining_events: [],
       lesson_error: nil,
       homework_saving: nil,
@@ -736,7 +752,7 @@ defmodule PronotexWeb.DashboardLive do
              week: from,
              mode: mode,
              events:
-               if(section == "agenda",
+               if(section in ["agenda", "devoirs", "cantine"],
                  do: api_call(api, account, :events, [child.id]),
                  else: {:ok, []}
                ),
@@ -1155,17 +1171,31 @@ defmodule PronotexWeb.DashboardLive do
   end
 
   defp apply_result(socket, :events, {:ok, events}) do
+    {from, to} =
+      if socket.assigns.section == "agenda" do
+        from = socket.assigns.agenda_from
+        {from, Date.add(Date.beginning_of_week(from), 4)}
+      else
+        from = socket.assigns.week
+        {from, Date.add(from, 6)}
+      end
+
     socket
     |> assign(
       event_count: length(events),
+      holiday: Pronotex.Agenda.holiday(events, from, to),
       event_error: nil,
       remaining_events: Enum.drop(events, 8)
     )
     |> stream(:events, Enum.take(events, 8), reset: true)
   end
 
-  defp apply_result(socket, :events, {:error, error}),
-    do: assign(socket, :event_error, message(error))
+  defp apply_result(socket, :events, {:error, error}) do
+    assign(socket,
+      holiday: nil,
+      event_error: if(socket.assigns.section == "agenda", do: message(error))
+    )
+  end
 
   defp apply_result(socket, :grades, :skip), do: socket
 
@@ -1220,6 +1250,7 @@ defmodule PronotexWeb.DashboardLive do
 
     days =
       if socket.assigns.mode == :today and socket.assigns.agenda_from == socket.assigns.today and
+           not (lessons == [] and not is_nil(socket.assigns.holiday)) and
            not Enum.any?(days, &(&1.date == socket.assigns.today)) do
         [
           %{id: Date.to_iso8601(socket.assigns.today), date: socket.assigns.today, entries: []}
@@ -1301,6 +1332,10 @@ defmodule PronotexWeb.DashboardLive do
   defp message(%Pronotex.Pronote.Error{message: message}), do: message
   defp message(message) when is_binary(message), do: message
   defp message(_), do: "Impossible de charger les données pour le moment."
+
+  defp event_schedule(%{start: start, end: nil}) do
+    "À partir du #{Calendar.strftime(start, "%d/%m/%Y")} à #{clock(start)}"
+  end
 
   defp event_schedule(event) do
     first = Calendar.strftime(event.start, "%d/%m/%Y")

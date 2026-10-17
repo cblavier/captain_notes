@@ -127,9 +127,9 @@ defmodule PronotexWeb.TimetableComponents do
               </article>
             </div>
           </section>
-          <p :if={!@loading && !@error && @entries == []} class="week-empty">
-            Aucun cours cette semaine.
-          </p>
+          <div :if={!@loading && !@error && @entries == []} class="week-empty">
+            <.empty_state id="week-no-lessons" text="Aucun cours cette semaine." />
+          </div>
         </div>
       </div>
     </dialog>

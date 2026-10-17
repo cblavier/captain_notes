@@ -203,11 +203,12 @@ defmodule Pronotex.Pronote.SessionTest do
       {server, agent} = session(options)
       assert {:ok, recipients} = Pronote.message_recipients(server)
 
-      assert Enum.map(recipients, & &1.type) |> Enum.sort() == [
-               "Personnel",
-               "Professeur",
-               "Responsable"
-             ]
+      expected_types = ["Personnel", "Professeur", "Responsable"]
+
+      expected_types =
+        if options == [], do: expected_types ++ ["Responsable"], else: expected_types
+
+      assert Enum.map(recipients, & &1.type) |> Enum.sort() == expected_types
 
       assert Enum.all?(recipients, &(!Map.has_key?(&1, :resource)))
       teacher = Enum.find(recipients, &(&1.type == "Professeur"))
@@ -237,6 +238,40 @@ defmodule Pronotex.Pronote.SessionTest do
       stop_supervised(:student_agent)
       stop_supervised(Agent)
     end
+  end
+
+  test "class parents and delegates are extracted from groups and deduplicated across children" do
+    {server, agent} = session()
+    assert {:ok, recipients} = Pronote.message_recipients(server)
+
+    assert Enum.filter(recipients, &(&1.type == "Responsable")) |> Enum.map(& &1.id) == [
+             "5:contact-5",
+             "5:delegate-5"
+           ]
+
+    log =
+      capture_log(fn ->
+        assert {:ok, :simulated} =
+                 Pronote.send_message(
+                   ["5:contact-5", "5:delegate-5"],
+                   "Réunion de classe",
+                   "Bonjour",
+                   server
+                 )
+      end)
+
+    assert log =~ "contact-5"
+    assert log =~ "delegate-5"
+    refute Enum.any?(Agent.get(agent, & &1.calls), &(elem(&1, 0) == "SaisieMessage"))
+  end
+
+  test "parents unavailable in Pronote cannot be selected for sending" do
+    {server, _} = session(no_parent_recipients: true)
+    assert {:ok, recipients} = Pronote.message_recipients(server)
+    refute Enum.any?(recipients, &(&1.type == "Responsable"))
+
+    assert {:error, %Error{reason: :invalid_message}} =
+             Pronote.send_message(["5:contact-5"], "Réunion de classe", "Bonjour", server)
   end
 
   test "forged recipients and empty messages never reach Pronote" do

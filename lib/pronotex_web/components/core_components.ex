@@ -458,8 +458,8 @@ defmodule PronotexWeb.CoreComponents do
   def empty_state(assigns) do
     ~H"""
     <div id={@id} class="empty-state">
+      <PronotexWeb.EmptyStateComponents.illustration />
       <p>{@text}</p>
-      <.brand_logo variant="simple" class="empty-state-logo" />
     </div>
     """
   end

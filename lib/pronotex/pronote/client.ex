@@ -257,18 +257,25 @@ defmodule Pronotex.Pronote.Client do
     {recipients, transport} =
       Enum.map_reduce(client.children, client.transport, fn child, transport ->
         Enum.map_reduce([3, 5, 34], transport, fn kind, transport ->
+          # PRONOTE uses its parent-public filter for responsible recipients,
+          # including the classes accessible to parent delegates.
+          filter =
+            if client.transport.space == 2 and kind == 5,
+              do: %{"N" => 0, "G" => 6},
+              else: Map.take(child, ["N", "G", "L"])
+
           {data, transport} =
             Transport.call(transport, "ListeRessourcesPourCommunication", %{
               "Signature" => signature(client, child["N"], 131),
               "data" => %{
                 "onglet" => %{"N" => 0, "G" => kind},
-                "filtreElement" => Map.take(child, ["N", "G", "L"])
+                "filtreElement" => filter
               }
             })
 
           rows = get_in(data, ["listeRessourcesPourCommunication", "V"])
           unless is_list(rows), do: raise(Error.new(:protocol))
-          {Enum.map(rows, &Pronotex.Pronote.Recipient.parse/1), transport}
+          {Pronotex.Pronote.Recipient.parse_list(rows), transport}
         end)
       end)
 

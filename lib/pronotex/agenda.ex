@@ -1,6 +1,57 @@
 defmodule Pronotex.Agenda do
   @moduledoc "Presentation of a day's lessons, replacements and gaps."
 
+  @doc "Identifies a school holiday covering the displayed dates using Pronote events."
+  def holiday(events, from, to) do
+    Enum.find_value(events, fn event ->
+      with kind when not is_nil(kind) <- holiday_kind(event.title),
+           %NaiveDateTime{} = first <- event.start,
+           %NaiveDateTime{} = last <- event.end,
+           :lt <- NaiveDateTime.compare(first, last) do
+        resume =
+          if NaiveDateTime.to_time(last) == ~T[00:00:00],
+            do: NaiveDateTime.to_date(last),
+            else: last |> NaiveDateTime.to_date() |> Date.add(1)
+
+        resume = next_weekday(resume)
+
+        if Date.compare(from, NaiveDateTime.to_date(first)) != :lt &&
+             Date.compare(to, from) != :lt && Date.compare(to, resume) == :lt do
+          %{kind: kind, return_date: resume}
+        end
+      else
+        _ -> nil
+      end
+    end)
+  end
+
+  defp holiday_kind(title) do
+    title =
+      (title || "")
+      |> String.downcase()
+      |> String.normalize(:nfd)
+      |> String.replace(~r/\p{Mn}/u, "")
+
+    if Regex.match?(~r/\b(vacances|conges)\b/u, title) do
+      cond do
+        Regex.match?(~r/\b(toussaint|automne)\b/u, title) -> :autumn
+        Regex.match?(~r/\bnoel\b/u, title) -> :christmas
+        Regex.match?(~r/\b(hiver|fevrier)\b/u, title) -> :winter
+        Regex.match?(~r/\b(paques|printemps)\b/u, title) -> :spring
+        Regex.match?(~r/\bete\b|\bgrandes\s+vacances\b/u, title) -> :summer
+        true -> nil
+      end
+    end
+  end
+
+  defp next_weekday(date) do
+    case Date.day_of_week(date) do
+      6 -> Date.add(date, 2)
+      7 -> Date.add(date, 1)
+      _ -> date
+    end
+  end
+
   @doc "Hides canceled lessons replaced by an overlapping active lesson."
   def without_replaced_cancellations(lessons) do
     active = Enum.reject(lessons, & &1.canceled)

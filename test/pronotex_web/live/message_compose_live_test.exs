@@ -23,6 +23,26 @@ defmodule PronotexWeb.MessageComposeLiveTest do
         :load_error ->
           {:error, :offline}
 
+        :parent_groups ->
+          {:ok,
+           for n <- 1..55 do
+             groups =
+               cond do
+                 n <= 2 -> ["Parents de la classe 6B", "Parents délégués 6B"]
+                 n <= 53 -> ["Parents de la classe 6B"]
+                 true -> ["Parents délégués 4A"]
+               end
+
+             %{
+               id: "5:parent-#{n}",
+               name: "Parent #{n}",
+               type: "Responsable",
+               subjects: [],
+               roles: [],
+               groups: groups
+             }
+           end}
+
         :no_school_office ->
           {:ok, [%{id: "3:teacher", name: "Mme Martin", type: "Professeur", subjects: []}]}
 
@@ -47,7 +67,13 @@ defmodule PronotexWeb.MessageComposeLiveTest do
                type: "Professeur",
                subjects: ["Mathématiques"]
              },
-             %{id: "5:parent", name: "M. Dupont", type: "Responsable", subjects: []},
+             %{
+               id: "5:parent",
+               name: "M. Dupont",
+               type: "Responsable",
+               subjects: [],
+               roles: ["Parent (6B)", "Parent délégué (4A)"]
+             },
              %{id: "34:staff", name: "Vie scolaire", type: "Personnel", subjects: []}
            ]}
       end
@@ -117,6 +143,79 @@ defmodule PronotexWeb.MessageComposeLiveTest do
     end)
 
     {:ok, conn: build_conn() |> Plug.Test.init_test_session(Pronotex.Auth.session("parent-1"))}
+  end
+
+  test "parent groups show actual counts and select unique individuals for sending", %{conn: conn} do
+    Application.put_env(:pronotex, :composer_mode, :parent_groups)
+    view = compose(conn)
+    render_click(view, "show-recipients")
+
+    for label <- [
+          "Parents de la classe 6B (53)",
+          "Parents délégués 4A (2)",
+          "Parents délégués 6B (2)"
+        ] do
+      assert has_element?(view, "#recipient-options button", label)
+    end
+
+    render_click(view, "add-recipient", %{"id" => "group:forged"})
+    refute has_element?(view, "#selected-recipients")
+    render_click(view, "add-recipient", %{"id" => "5:parent-1"})
+    render_click(view, "show-recipients")
+    view |> element("#recipient-options button", "Parents délégués 6B (2)") |> render_click()
+    render_click(view, "show-recipients")
+    refute has_element?(view, "#recipient-options button", "Parents délégués 6B (2)")
+    view |> element("#recipient-options button", "Parents de la classe 6B (53)") |> render_click()
+
+    render_click(view, "remove-recipient", %{"id" => "5:parent-2"})
+    render_click(view, "show-recipients")
+    view |> element("#recipient-options button", "Parents délégués 6B (2)") |> render_click()
+    render_click(view, "show-recipients")
+    view |> element("#recipient-options button", "Parents délégués 4A (2)") |> render_click()
+
+    view
+    |> form("#message-form", draft: %{subject: "Réunion de classe", content: "Bonjour"})
+    |> render_submit()
+
+    render_click(view, "confirm-send")
+    assert_received {:sent, ids, "Réunion de classe", "Bonjour"}
+    assert length(ids) == 55
+    assert MapSet.new(ids) == MapSet.new(1..55, &"5:parent-#{&1}")
+  end
+
+  test "a class parent can be found and selected as a new message recipient", %{conn: conn} do
+    view = compose(conn)
+    render_click(view, "show-recipients")
+
+    view
+    |> form("#message-form", draft: %{query: "Dupont"})
+    |> render_change(%{"_target" => ["draft", "query"]})
+
+    assert has_element?(view, "#recipient-options button", "M. Dupont")
+    assert has_element?(view, "#recipient-options button", "Responsable")
+    assert has_element?(view, "#recipient-options button", "Parent (6B)")
+    assert has_element?(view, "#recipient-options button", "Parent délégué (4A)")
+
+    for query <- ["6B", "delegue (4A)"] do
+      view
+      |> form("#message-form", draft: %{query: query})
+      |> render_change(%{"_target" => ["draft", "query"]})
+
+      assert has_element?(view, "#recipient-options button", "M. Dupont")
+      refute has_element?(view, "#recipient-options button", "Mme Élise Martin")
+    end
+
+    render_click(view, "add-recipient", %{"id" => "5:parent"})
+    assert has_element?(view, "#selected-recipients", "M. Dupont")
+    assert has_element?(view, "#selected-recipients", "Parent (6B)")
+    assert has_element?(view, "#selected-recipients", "Parent délégué (4A)")
+
+    view
+    |> form("#message-form", draft: %{subject: "Réunion de classe", content: "Bonjour"})
+    |> render_submit()
+
+    render_click(view, "confirm-send")
+    assert_received {:sent, ["5:parent"], "Réunion de classe", "Bonjour"}
   end
 
   test "absence placeholders block sending until the draft is completed", %{conn: conn} do

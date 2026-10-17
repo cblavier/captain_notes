@@ -304,11 +304,13 @@ defmodule PronotexWeb.MessageComposeLive do
   def handle_event("hide-recipients", _, socket), do: {:noreply, assign(socket, dropdown: false)}
 
   def handle_event("add-recipient", %{"id" => id}, socket) do
-    if Enum.any?(socket.assigns.recipients, &(&1.id == id)) do
+    recipient = Enum.find(recipient_options(socket.assigns), &(&1.id == id))
+
+    if recipient do
       {:noreply,
        socket
        |> assign(
-         selected: Enum.uniq(socket.assigns.selected ++ [id]),
+         selected: Enum.uniq(socket.assigns.selected ++ Map.get(recipient, :member_ids, [id])),
          query: "",
          dropdown: false,
          confirmation: nil
@@ -492,10 +494,20 @@ defmodule PronotexWeb.MessageComposeLive do
   defp matching_recipients(assigns) do
     query = normalize(assigns.query)
 
-    assigns.recipients
-    |> Enum.reject(&(&1.id in assigns.selected))
-    |> Enum.filter(&(normalize(Enum.join([&1.name, &1.type | &1.subjects], " ")) =~ query))
+    recipient_options(assigns)
+    |> Enum.reject(fn recipient ->
+      Enum.all?(Map.get(recipient, :member_ids, [recipient.id]), &(&1 in assigns.selected))
+    end)
+    |> Enum.filter(fn recipient ->
+      labels =
+        [recipient.name, recipient.type | recipient.subjects] ++ Map.get(recipient, :roles, [])
+
+      normalize(Enum.join(labels, " ")) =~ query
+    end)
   end
+
+  defp recipient_options(assigns),
+    do: Pronotex.Pronote.Recipient.groups(assigns.recipients) ++ assigns.recipients
 
   defp normalize(value),
     do: value |> String.downcase() |> String.normalize(:nfd) |> String.replace(~r/\p{Mn}/u, "")

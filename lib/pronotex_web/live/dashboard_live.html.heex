@@ -209,8 +209,15 @@
       class="min-w-0"
     >
       <div class="space-y-5">
+        <.holiday_placeholder
+          :if={
+            @section == "cantine" && !@loading && !@error && !@menu_error && @menu_count == 0 &&
+              @holiday
+          }
+          holiday={@holiday}
+        />
         <.empty_state
-          :if={!@loading && !@error && !@menu_error && @menu_count == 0}
+          :if={!@loading && !@error && !@menu_error && @menu_count == 0 && !@holiday}
           id="no-menus"
           text="Aucun menu publié pour cette période."
         />
@@ -319,8 +326,18 @@
         </nav>
         <section id="timetable" aria-label="Emploi du temps" class="min-w-0">
           <div class="space-y-5">
+            <.holiday_placeholder
+              :if={
+                @section == "agenda" && !@loading && !@error && !@lesson_error &&
+                  @lesson_count == 0 && @holiday
+              }
+              holiday={@holiday}
+            />
             <.empty_state
-              :if={!@loading && !@error && !@lesson_error && @lesson_count == 0 && @mode == :week}
+              :if={
+                !@loading && !@error && !@lesson_error && @lesson_count == 0 && @mode == :week &&
+                  !@holiday
+              }
               id="no-lessons"
               text="Aucun cours cette semaine."
             />
@@ -538,8 +555,15 @@
       >
         <section id="homework" aria-label="Devoirs" class="min-w-0">
           <div class="space-y-5">
+            <.holiday_placeholder
+              :if={
+                @section == "devoirs" && !@loading && !@error && !@homework_error &&
+                  @homework_count == 0 && @holiday
+              }
+              holiday={@holiday}
+            />
             <.empty_state
-              :if={!@loading && !@error && !@homework_error && @homework_count == 0}
+              :if={!@loading && !@error && !@homework_error && @homework_count == 0 && !@holiday}
               id="no-homework"
               text={
                 if @mode == :today,

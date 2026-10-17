@@ -158,8 +158,14 @@ defmodule PronotexWeb.MessageComponents do
 
   def recipient_badges(assigns) do
     ~H"""
-    <span class="recipient-name">{@recipient.name}</span>
+    <span class="recipient-name">
+      {@recipient.name}
+      <%= if Map.has_key?(@recipient, :member_ids) do %>
+        ({length(@recipient.member_ids)})
+      <% end %>
+    </span>
     <.label_badge>{@recipient.type}</.label_badge>
+    <.label_badge :for={role <- Map.get(@recipient, :roles, [])}>{role}</.label_badge>
     <span :for={subject <- @recipient.subjects} class="badge badge-xs recipient-subject-badge">
       {subject}
     </span>

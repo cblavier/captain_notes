@@ -663,8 +663,19 @@ defmodule Pronotex.Test.PronoteServer do
   defp data("ListeRessourcesPourCommunication", payload, state) do
     kind = payload["data"]["onglet"]["G"]
     assert kind in [3, 5, 34]
-    child = payload["data"]["filtreElement"]["N"]
+
+    child =
+      if state.options[:space] == 3,
+        do: payload["data"]["filtreElement"]["N"],
+        else: payload["Signature"]["membre"]["N"]
+
     assert child in ["child-a", "child-b"]
+
+    if state.options[:space] != 3 and kind == 5 do
+      assert payload["data"]["filtreElement"] == %{"N" => 0, "G" => 6}
+    else
+      assert payload["data"]["filtreElement"]["N"] == child
+    end
 
     expected =
       if state.options[:space] == 3,
@@ -683,6 +694,36 @@ defmodule Pronotex.Test.PronoteServer do
       },
       %{"N" => "blocked", "G" => kind, "L" => "Non joignable", "avecDiscussion" => false}
     ]
+
+    rows =
+      if kind == 5 do
+        parent = hd(rows) |> Map.delete("avecDiscussion")
+
+        cond do
+          state.options[:no_parent_recipients] ->
+            []
+
+          state.options[:space] == 3 ->
+            [parent]
+
+          true ->
+            [
+              %{
+                "L" => "Parents de la classe (5B)",
+                "listeResp" => %{"V" => [parent]}
+              },
+              %{
+                "L" => "Parents délégués (5B)",
+                "listeResp" => %{
+                  "V" => [parent, %{parent | "N" => "delegate-5", "L" => "Mme Durand"}]
+                }
+              },
+              %{"L" => "Parents délégués (3A)", "listeResp" => %{"V" => []}}
+            ]
+        end
+      else
+        rows
+      end
 
     {%{"listeRessourcesPourCommunication" => %{"V" => rows}}, state, nil, false}
   end
