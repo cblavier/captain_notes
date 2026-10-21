@@ -1109,6 +1109,23 @@ defmodule CaptainNotesWeb.DashboardLive do
     child |> first_name() |> String.trim() |> String.downcase() |> String.replace(~r/\s+/u, "-")
   end
 
+  defp section_urls(child, mode, week, period) do
+    socket = %{
+      assigns: %{
+        child: child,
+        mode: mode,
+        week: week,
+        grade_period: period,
+        section: "agenda",
+        open_discussion: nil
+      }
+    }
+
+    Map.new(["agenda", "devoirs", "notes", "cantine"], fn section ->
+      {section, selection_url(socket, section: section)}
+    end)
+  end
+
   defp selection_url(socket, overrides \\ []) do
     child = Keyword.get(overrides, :child, socket.assigns.child)
     section = Keyword.get(overrides, :section, socket.assigns.section)

@@ -8,6 +8,7 @@ defmodule CaptainNotesWeb.AppHeader do
   attr :section, :string, required: true
   attr :loading, :boolean, default: false
   attr :current_url, :string, required: true
+  attr :section_urls, :map, default: %{}
   attr :today, :any, required: true
   attr :notifications, :list, default: []
   attr :messages_unread, :integer, default: 0
@@ -250,7 +251,7 @@ defmodule CaptainNotesWeb.AppHeader do
               ]
             }
             id={"nav-#{section}"}
-            phx-click="section"
+            phx-click={if url = @section_urls[section], do: JS.patch(url), else: "section"}
             phx-value-section={section}
             disabled={@loading}
             aria-current={
