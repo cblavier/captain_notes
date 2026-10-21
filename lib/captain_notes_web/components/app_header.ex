@@ -238,6 +238,10 @@ defmodule CaptainNotesWeb.AppHeader do
       >
         <nav
           id="section-navigation"
+          phx-hook={if map_size(@section_urls) > 0, do: "SectionNavigation"}
+          data-section={if @section == "timetable", do: "agenda", else: @section}
+          data-loading={to_string(@loading)}
+          aria-busy={to_string(@loading)}
           aria-label="Rubriques"
           class="flex max-w-full items-center gap-3 overflow-x-auto lg:gap-6"
         >

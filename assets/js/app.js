@@ -8,6 +8,7 @@ import {Socket} from "phoenix"
 import {startFooterCat, footerCatActive} from "./footer_cat"
 import {LiveSocket} from "phoenix_live_view"
 import {Settings} from "./settings"
+import {SectionNavigation} from "./section_navigation"
 
 // The login form is a regular POST form, outside LiveView.
 document.addEventListener("click", event => {
@@ -88,7 +89,7 @@ const AgendaScroll = {
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {MessageComposer, WeekOverview, AgendaScroll, Settings, AppBadge},
+  hooks: {MessageComposer, WeekOverview, AgendaScroll, Settings, AppBadge, SectionNavigation},
 })
 
 // Give reconnects a grace period, including after returning to a sleeping tab.

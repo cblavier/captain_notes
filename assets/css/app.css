@@ -278,6 +278,26 @@ html { touch-action: manipulation; scrollbar-gutter: stable; }
   border-radius: 999px;
   background: var(--day-ink);
 }
+/* The requested tab is selected locally while its LiveView patch is pending. */
+html[data-section-navigation-pending] #page-content { display: none; }
+html[data-section-navigation-pending] :is(#date-navigation, #grade-period-form) { visibility: hidden; }
+#section-navigation .navigation-tab[data-pending]::after {
+  background: linear-gradient(90deg, transparent 0%, var(--day-ink) 45%, var(--day-ink) 55%, transparent 100%);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: section-navigation-sweep 1s linear infinite;
+}
+@keyframes section-navigation-sweep {
+  from { background-position: -85% 0; }
+  to { background-position: 185% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #section-navigation .navigation-tab[data-pending]::after {
+    animation: none;
+    background: var(--day-ink);
+    opacity: 0.5;
+  }
+}
 .navigation-tab-icon { display: none; }
 @media (width > 500px) {
   .navigation-tab-icon { display: inline-block; }
