@@ -3,11 +3,81 @@ defmodule CaptainNotesWeb.DashboardCache do
   alias CaptainNotes.Pronote.{ReadCache, Session, WeekCycle}
 
   def fetch(%{api: CaptainNotes.Pronote, account: account} = assigns, name) do
-    entries = account.id |> Session.for_account() |> ReadCache.display()
-    fetch(entries, assigns, name)
+    # Only the selected page and its badge counts leave the cache process.
+    # In particular, other pages do not copy the potentially large grade history.
+    selected =
+      Map.take(assigns, [
+        :selected_slug,
+        :grade_period,
+        :today,
+        :week,
+        :agenda_from,
+        :mode,
+        :section,
+        :account,
+        :child,
+        :week_overview_start
+      ])
+
+    account.id
+    |> Session.for_account()
+    |> ReadCache.select_display(fn entries -> fetch(entries, selected, name) end)
   end
 
   def fetch(_assigns, _name), do: :miss
+
+  def status(%{api: CaptainNotes.Pronote, account: account} = assigns, name) do
+    selected =
+      Map.take(assigns, [
+        :selected_slug,
+        :grade_period,
+        :today,
+        :week,
+        :agenda_from,
+        :mode,
+        :section,
+        :account,
+        :child,
+        :week_overview_start
+      ])
+
+    account.id
+    |> Session.for_account()
+    |> ReadCache.display_status(
+      fn entries -> fetch(entries, selected, name) end,
+      fn entries -> complete_fetch(entries, selected, name) end
+    )
+  end
+
+  def status(_assigns, _name), do: {:miss, false}
+
+  defp complete_fetch(entries, assigns, :load) do
+    case fetch(entries, assigns, :load) do
+      {:ok, result} = cached ->
+        id = result.child.id
+        from = assigns.week
+
+        agenda_to =
+          if assigns.mode == :today,
+            do: Date.add(Date.beginning_of_week(assigns.agenda_from), 4),
+            else: Date.add(from, 6)
+
+        required =
+          case assigns.section do
+            "agenda" -> [{:events, id}, {:lessons, id, assigns.agenda_from, agenda_to}]
+            "devoirs" -> [{:events, id}, {:homework, id, from, Date.add(from, 6)}]
+            "cantine" -> [{:events, id}, {:menus, id, from, Date.add(from, 6)}]
+            _ -> []
+          end
+
+        if Enum.all?(required, &match?({:ok, _}, read(entries, &1))), do: cached, else: :miss
+
+      other ->
+        other
+    end
+  end
+
+  defp complete_fetch(entries, assigns, name), do: fetch(entries, assigns, name)
 
   def fetch(entries, assigns, :load) do
     notes =
@@ -45,8 +115,8 @@ defmodule CaptainNotesWeb.DashboardCache do
       kinds =
         case assigns.section do
           "agenda" -> [:events, :lessons]
-          "devoirs" -> [:homework]
-          "cantine" -> [:menus]
+          "devoirs" -> [:events, :homework]
+          "cantine" -> [:events, :menus]
           _ -> []
         end
 

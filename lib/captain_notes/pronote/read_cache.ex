@@ -19,6 +19,15 @@ defmodule CaptainNotes.Pronote.ReadCache do
 
   def display(owner, server \\ __MODULE__), do: GenServer.call(server, {:display, owner})
 
+  # Project in the cache process so unrelated snapshots never cross process heaps.
+  def select_display(owner, select, server \\ __MODULE__),
+    do: GenServer.call(server, {:select_display, owner, select})
+
+  def display_status(owner, select, complete, server \\ __MODULE__),
+    do: GenServer.call(server, {:display_status, owner, select, complete})
+
+  def revision, do: GenServer.call(__MODULE__, :revision)
+
   def remember(owner, operation, value, token \\ nil) do
     key = {owner, {:display, operation}}
     put(key, value, :timer.hours(24), token || generation(key))
@@ -52,6 +61,7 @@ defmodule CaptainNotes.Pronote.ReadCache do
         _ -> false
       end)
 
+    entries = stale_display(entries, owner, :all, state.clock.())
     {:reply, :ok, %{state | entries: entries, generation: make_ref()}}
   end
 
@@ -65,12 +75,37 @@ defmodule CaptainNotes.Pronote.ReadCache do
           false
       end)
 
+    entries = stale_display(entries, owner, kinds, state.clock.())
     {:reply, :ok, %{state | entries: entries, generation: make_ref()}}
   end
 
   def handle_call({:generation, key}, _from, state), do: {:reply, generation(state, key), state}
 
+  def handle_call(:revision, _from, state),
+    do: {:reply, {state.generation, state.kind_generations}, state}
+
+  def handle_call({:display_status, owner, select, complete}, _from, state) do
+    state = prune(state)
+    now = state.clock.()
+
+    all =
+      for {{^owner, {:display, op}}, {value, _, _}} <- state.entries, into: %{}, do: {op, value}
+
+    fresh =
+      for {{^owner, {:display, op}}, {value, _, inserted}} <- state.entries,
+          now - inserted < display_ttl(elem(op, 0)),
+          into: %{},
+          do: {op, value}
+
+    result = select.(all)
+    {:reply, {result, result != :miss and complete.(fresh) == result}, state}
+  end
+
   def handle_call({:display, owner}, _from, state) do
+    handle_call({:select_display, owner, &Function.identity/1}, nil, state)
+  end
+
+  def handle_call({:select_display, owner, select}, _from, state) do
     state = prune(state)
 
     entries =
@@ -78,7 +113,7 @@ defmodule CaptainNotes.Pronote.ReadCache do
           into: %{},
           do: {operation, value}
 
-    {:reply, entries, state}
+    {:reply, select.(entries), state}
   end
 
   def handle_call({:notes, owner}, _from, state) do
@@ -153,5 +188,35 @@ defmodule CaptainNotes.Pronote.ReadCache do
       end)
 
     %{state | entries: entries}
+  end
+
+  defp display_ttl(kind)
+       when kind in [
+              :lessons,
+              :events,
+              :homework,
+              :discussions,
+              :parent_discussions,
+              :correspondence,
+              :grades,
+              :menus
+            ],
+       do: ttl(kind)
+
+  defp display_ttl(_), do: :timer.hours(24)
+
+  defp stale_display(entries, owner, kinds, now) do
+    Map.new(entries, fn
+      {{^owner, {:display, operation}} = key, {value, expires, inserted}} ->
+        inserted =
+          if kinds == :all or elem(operation, 0) in kinds,
+            do: now - :timer.hours(24),
+            else: inserted
+
+        {key, {value, expires, inserted}}
+
+      entry ->
+        entry
+    end)
   end
 end

@@ -21,6 +21,45 @@ defmodule CaptainNotes.Pronote.ReadCacheTest do
     assert {:miss, _} = ReadCache.fetch(key, cache)
   end
 
+  test "display freshness expires without hiding data and explicit refresh marks it stale", %{
+    cache: cache,
+    clock: clock
+  } do
+    owner = self()
+    key = {owner, {:display, {:homework, "alice"}}}
+    select = fn entries -> Map.get(entries, {:homework, "alice"}, :miss) end
+    {:miss, generation} = ReadCache.fetch(key, cache)
+    ReadCache.put(key, {:ok, [:task]}, :timer.hours(24), generation, cache)
+    assert {{:ok, [:task]}, true} = ReadCache.display_status(owner, select, select, cache)
+    Agent.update(clock, fn _ -> 300_000 end)
+    assert {{:ok, [:task]}, false} = ReadCache.display_status(owner, select, select, cache)
+    {:hit, _} = ReadCache.fetch(key, cache)
+    ReadCache.put(key, {:ok, [:task]}, :timer.hours(24), generation, cache)
+    assert {{:ok, [:task]}, true} = ReadCache.display_status(owner, select, select, cache)
+    ReadCache.invalidate({:owner_reads, owner}, cache)
+    assert {{:ok, [:task]}, false} = ReadCache.display_status(owner, select, select, cache)
+  end
+
+  test "display projection only returns selected data and honors expiry", %{
+    cache: cache,
+    clock: clock
+  } do
+    key = {self(), {:display, {:menus, "alice"}}}
+    {:miss, generation} = ReadCache.fetch(key, cache)
+    ReadCache.put(key, [:menu], 100, generation, cache)
+
+    assert {^cache, [:menu]} =
+             ReadCache.select_display(
+               self(),
+               fn entries -> {self(), Map.get(entries, {:menus, "alice"})} end,
+               cache
+             )
+
+    assert %{} == ReadCache.select_display(:other_owner, & &1, cache)
+    Agent.update(clock, fn _ -> 100 end)
+    assert %{} == ReadCache.select_display(self(), & &1, cache)
+  end
+
   test "display snapshots survive read expiry, stay isolated and expire after a day", %{
     cache: cache,
     clock: clock

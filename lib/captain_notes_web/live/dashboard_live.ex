@@ -806,14 +806,48 @@ defmodule CaptainNotesWeb.DashboardLive do
   # Subsequent navigation remains asynchronous; PRONOTE's read cache avoids
   # repeating remote requests between the two mounts.
   defp start_read(socket, name, read) do
-    case CaptainNotesWeb.DashboardCache.fetch(socket.assigns, name) do
+    operation = if is_tuple(name), do: elem(name, 0), else: name
+    fields = [section: socket.assigns.section, operation: operation]
+    original_read = read
+
+    refresh_key =
+      if socket.assigns.api == CaptainNotes.Pronote do
+        {CaptainNotes.Pronote.Session.for_account(socket.assigns.account.id),
+         CaptainNotes.Pronote.ReadCache.revision(), operation,
+         Map.take(socket.assigns, [
+           :selected_slug,
+           :section,
+           :week,
+           :mode,
+           :grade_period,
+           :today,
+           :agenda_from,
+           :week_overview_start
+         ])}
+      end
+
+    read = fn ->
+      run = fn -> CaptainNotes.Performance.measure(:dashboard_read, fields, original_read) end
+      if refresh_key, do: CaptainNotes.Pronote.ReadRefresh.run(refresh_key, run), else: run.()
+    end
+
+    {cached, fresh?} =
+      CaptainNotes.Performance.measure(:display_cache, fields, fn ->
+        CaptainNotesWeb.DashboardCache.status(socket.assigns, name)
+      end)
+
+    case cached do
       :miss ->
         start_uncached_read(socket, name, read)
 
       cached ->
         socket = put_private(socket, :cache_render, true)
         {:noreply, socket} = handle_async(name, {:ok, cached}, socket)
-        start_async(socket, {:cached_refresh, name, refresh_generation(socket, name)}, read)
+
+        if fresh?,
+          do: socket,
+          else:
+            start_async(socket, {:cached_refresh, name, refresh_generation(socket, name)}, read)
     end
   end
 

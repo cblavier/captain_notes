@@ -41,22 +41,30 @@ defmodule CaptainNotes.GradeHistory do
 
   @doc "Record one fresh remote response atomically; repeat observations do not duplicate history."
   def record(context, report, observed_at \\ DateTime.utc_now(), options \\ []) do
-    Repo.transaction(fn ->
-      legacy = Keyword.get(options, :legacy_context)
+    result =
+      Repo.transaction(fn ->
+        legacy = Keyword.get(options, :legacy_context)
 
-      scope =
-        Repo.get_by(Scope, context) ||
-          (legacy && Repo.get_by(Scope, legacy)) || Repo.insert!(struct!(Scope, context))
+        scope =
+          Repo.get_by(Scope, context) ||
+            (legacy && Repo.get_by(Scope, legacy)) || Repo.insert!(struct!(Scope, context))
 
-      scope =
-        if scope.student_id != context.student_id,
-          do: scope |> Ecto.Changeset.change(student_id: context.student_id) |> Repo.update!(),
-          else: scope
+        scope =
+          if scope.student_id != context.student_id,
+            do: scope |> Ecto.Changeset.change(student_id: context.student_id) |> Repo.update!(),
+            else: scope
 
-      Enum.each(report.grades, &record_grade(scope.id, &1, observed_at))
-      record_averages(scope.id, report, observed_at)
-      scope.id
-    end)
+        Enum.each(report.grades, &record_grade(scope.id, &1, observed_at))
+        record_averages(scope.id, report, observed_at)
+        scope.id
+      end)
+
+    # Other profiles can update the same child's history. Do not reuse a report
+    # prepared before that successful transaction, including an in-flight one.
+    if match?({:ok, _}, result),
+      do: CaptainNotes.Pronote.ReadCache.invalidate({:kind, :prepared_grades})
+
+    result
   end
 
   def grades(context) do

@@ -418,9 +418,14 @@ defmodule CaptainNotes.Pronote.SessionTest do
 
     CaptainNotes.Repo.delete_all(snapshots)
     assert {:ok, cached} = Pronote.grades("child-a", nil, server)
-    assert cached.average_history == []
+    # An out-of-band database edit does not discard the prepared report.
+    assert cached.average_history == report.average_history
     assert Map.delete(cached, :average_history) == Map.delete(report, :average_history)
     refute CaptainNotes.Repo.exists?(snapshots)
+
+    CaptainNotes.Pronote.ReadCache.invalidate({:kind, :prepared_grades})
+    assert {:ok, reloaded} = Pronote.grades("child-a", nil, server)
+    assert reloaded.average_history == []
 
     Pronote.clear_cache(server)
     assert {:ok, refreshed} = Pronote.grades("child-a", nil, server)

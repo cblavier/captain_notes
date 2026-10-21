@@ -7,6 +7,8 @@ defmodule CaptainNotes.Application do
 
   @impl true
   def start(_type, _args) do
+    CaptainNotes.Performance.attach()
+
     :persistent_term.put(
       {CaptainNotesWeb.DeploymentController, :version},
       Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
@@ -17,6 +19,7 @@ defmodule CaptainNotes.Application do
       {Ecto.Migrator, repos: [CaptainNotes.Repo]},
       CaptainNotes.Auth,
       CaptainNotes.Pronote.ReadCache,
+      CaptainNotes.Pronote.ReadRefresh,
       CaptainNotes.Pronote.Session,
       {Registry, keys: :unique, name: CaptainNotes.Pronote.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: CaptainNotes.Pronote.Supervisor},

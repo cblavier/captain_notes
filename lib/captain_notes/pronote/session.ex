@@ -215,7 +215,11 @@ defmodule CaptainNotes.Pronote.Session do
 
     case config do
       {:ok, config} ->
-        client = Client.login(config, Keyword.get(state.options, :req_options, []))
+        client =
+          CaptainNotes.Performance.measure(:pronote_login, [], fn ->
+            Client.login(config, Keyword.get(state.options, :req_options, []))
+          end)
+
         execute(operation, %{state | client: client})
 
       {:error, error} ->
@@ -283,9 +287,7 @@ defmodule CaptainNotes.Pronote.Session do
         operation == :refresh_grades
       )
 
-    history = average_history(client, child_id, grades)
-    grades = Map.update!(grades, :grades, &grades_by_publication(client, child_id, grades, &1))
-    grades = Map.put(grades, :average_history, history)
+    grades = prepared_grades(client, child_id, grades)
     children = Client.children(client)
     {default, _} = Client.grade_period(client, child_id, nil)
 
@@ -451,8 +453,10 @@ defmodule CaptainNotes.Pronote.Session do
 
     key = {self(), {:crypto.hash(:sha256, :erlang.term_to_binary(identity)), operation}}
 
-    cached = ReadCache.fetch(key)
-    cached = if force?, do: {:miss, ReadCache.generation(key)}, else: cached
+    cached =
+      CaptainNotes.Performance.measure(:pronote_cache, [operation: elem(operation, 0)], fn ->
+        if force?, do: {:miss, ReadCache.generation(key)}, else: ReadCache.fetch(key)
+      end)
 
     case cached do
       {:hit, reply} ->
@@ -471,7 +475,10 @@ defmodule CaptainNotes.Pronote.Session do
             do: {:discussions, []},
             else: {kind, args}
 
-        {reply, updated} = apply(Client, function, [client | args])
+        {reply, updated} =
+          CaptainNotes.Performance.measure(:pronote_read, [operation: kind], fn ->
+            apply(Client, function, [client | args])
+          end)
 
         if persist_read(updated, operation, reply, account_id) == :ok do
           ReadCache.put(key, reply, ReadCache.ttl(kind), generation)
@@ -490,6 +497,29 @@ defmodule CaptainNotes.Pronote.Session do
       require Logger
       Logger.warning("Unable to read grade publication history")
       grades
+  end
+
+  defp prepared_grades(client, child_id, report) do
+    fingerprint = :crypto.hash(:sha256, :erlang.term_to_binary(report))
+    key = {self(), {:prepared, {:prepared_grades, child_id, fingerprint}}}
+
+    case ReadCache.fetch(key) do
+      {:hit, prepared} ->
+        prepared
+
+      {:miss, generation} ->
+        prepared =
+          CaptainNotes.Performance.measure(:prepare_grades, [], fn ->
+            history = average_history(client, child_id, report)
+
+            report
+            |> Map.update!(:grades, &grades_by_publication(client, child_id, report, &1))
+            |> Map.put(:average_history, history)
+          end)
+
+        ReadCache.put(key, prepared, ReadCache.ttl(:grades), generation)
+        prepared
+    end
   end
 
   defp average_history(client, child_id, report) do
