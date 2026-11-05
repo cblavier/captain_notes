@@ -77,6 +77,22 @@ defmodule CaptainNotesWeb.DashboardCache do
     end
   end
 
+  defp complete_fetch(entries, assigns, :week_overview) do
+    monday = assigns.week_overview_start
+    child = assigns.child
+
+    case WeekCycle.counterpart(Map.get(child, :week_cycles, %{}), monday) do
+      {other_monday, _cycle} ->
+        with {:ok, _} <-
+               read(entries, {:lessons, child.id, other_monday, Date.add(other_monday, 4)}) do
+          fetch(entries, assigns, :week_overview)
+        end
+
+      nil ->
+        fetch(entries, assigns, :week_overview)
+    end
+  end
+
   defp complete_fetch(entries, assigns, name), do: fetch(entries, assigns, name)
 
   def fetch(entries, assigns, :load) do
@@ -121,7 +137,10 @@ defmodule CaptainNotesWeb.DashboardCache do
         end
 
       cached = Map.new(kinds, &{&1, read(entries, operations[&1])})
-      available? = Enum.any?(cached, fn {_, result} -> match?({:ok, _}, result) end)
+
+      # Missing resources must not be rendered as empty while they are loading.
+      available? =
+        kinds != [] and Enum.all?(cached, fn {_, result} -> match?({:ok, _}, result) end)
 
       if available? or (not is_nil(notes) and assigns.section == "notes") or
            assigns.section in ["settings", "timetable", "messages", "parent-messages", "carnet"] do
@@ -190,7 +209,7 @@ defmodule CaptainNotesWeb.DashboardCache do
               {:ok, lessons_with_cycle(lessons, other, monday, other_monday, cycle), nil}
 
             :miss ->
-              {:ok, lessons, "Les cours de l’autre cycle sont en cours d’actualisation."}
+              {:ok, lessons, nil}
           end
 
         nil ->

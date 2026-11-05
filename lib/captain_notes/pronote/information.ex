@@ -80,7 +80,9 @@ defmodule CaptainNotes.Pronote.Information do
       subject: raw["L"] || "Sans objet",
       author: raw["auteur"] || "",
       date: date,
-      unread: if(raw["lue"] == true, do: 0, else: 1),
+      # PRONOTE may leave `lue` false after the acknowledgement is confirmed.
+      unread:
+        if(raw["lue"] == true or (raw["estSondage"] != true and acknowledged), do: 0, else: 1),
       messages: messages,
       preview: messages |> Enum.map_join(" ", & &1.content) |> String.slice(0, 160)
     }

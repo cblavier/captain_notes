@@ -249,15 +249,15 @@ defmodule CaptainNotesWeb.DashboardLiveTest do
            }
          end}
       else
-        if mode == :communications do
+        if mode in [:communications, :information_without_acknowledgement] do
           {:ok,
            for kind <- [:discussion, :information, :survey] do
              %{
                id: "#{kind}-#{id}",
                kind: kind,
-               acknowledgement_required: kind == :information,
+               acknowledgement_required: kind == :information && mode == :communications,
                acknowledged: false,
-               can_acknowledge: kind == :information,
+               can_acknowledge: kind == :information && mode == :communications,
                subject: "Sujet #{kind}",
                author: "Établissement",
                date: "09/09/2026 11:22:35",
@@ -334,7 +334,7 @@ defmodule CaptainNotesWeb.DashboardLiveTest do
            row.id != thread ->
              row
 
-           Map.get(row, :kind) == :information ->
+           Map.get(row, :acknowledgement_required, false) ->
              %{row | acknowledged: true, can_acknowledge: false, unread: 0}
 
            true ->
@@ -353,7 +353,7 @@ defmodule CaptainNotesWeb.DashboardLiveTest do
            row.id != thread ->
              row
 
-           Map.get(row, :kind) == :information ->
+           Map.get(row, :acknowledgement_required, false) ->
              %{row | acknowledged: true, can_acknowledge: false, unread: 0}
 
            true ->
@@ -1738,6 +1738,34 @@ defmodule CaptainNotesWeb.DashboardLiveTest do
     refute_received :parent_discussions
   end
 
+  test "information without acknowledgement can be marked read and unread", %{conn: conn} do
+    Application.put_env(
+      :captain_notes,
+      :dashboard_test_mode,
+      :information_without_acknowledgement
+    )
+
+    {:ok, view, _} = live(conn, "/alice/messages/information-a")
+    render_async(view)
+    render_async(view)
+    refute_received {:mark_discussion, _, _, _}
+    assert has_element?(view, ".discussion-status[aria-label='Marquer comme lu']:not([disabled])")
+    view |> element(".communication-detail-header .discussion-status") |> render_click()
+    render_async(view)
+    assert_receive {:mark_discussion, "a", "information-a", true}
+
+    assert has_element?(
+             view,
+             ".discussion-status[aria-label='Marquer comme non lu']:not([disabled])",
+             "Lu"
+           )
+
+    view |> element(".communication-detail-header .discussion-status") |> render_click()
+    render_async(view)
+    assert_receive {:mark_discussion, "a", "information-a", false}
+    assert has_element?(view, ".discussion-status[aria-pressed=false]", "Non lu")
+  end
+
   test "information button acknowledges explicitly and cannot undo confirmation", %{conn: conn} do
     Application.put_env(:captain_notes, :dashboard_test_mode, :communications)
     {:ok, view, _} = live(conn, "/alice/messages/information-a")
@@ -2197,9 +2225,13 @@ defmodule CaptainNotesWeb.DashboardLiveTest do
     end
   end
 
-  test "cached agenda stays visible during refresh and survives a failed refresh", %{conn: conn} do
+  test "cached timetable silently loads the missing cycle and updates without navigation", %{
+    conn: conn
+  } do
+    Application.put_env(:captain_notes, :dashboard_test_mode, :cycles)
     {:ok, children} = API.children()
-    {:ok, lessons} = API.lessons("a", ~D[2026-09-14], ~D[2026-09-20])
+    {:ok, lessons} = API.lessons("a", ~D[2026-09-14], ~D[2026-09-18])
+    {:ok, other} = API.lessons("a", ~D[2026-09-21], ~D[2026-09-25])
     old = CaptainNotes.Pronote.Session.for_account("family")
     DynamicSupervisor.terminate_child(CaptainNotes.Pronote.Supervisor, old)
 
@@ -2212,9 +2244,48 @@ defmodule CaptainNotesWeb.DashboardLiveTest do
 
     CaptainNotes.Pronote.ReadCache.remember(
       server,
+      {:lessons, "a", ~D[2026-09-14], ~D[2026-09-18]},
+      lessons
+    )
+
+    Application.put_env(:captain_notes, :pronote_client, CaptainNotes.Pronote)
+    {:ok, view, _} = live(conn, "/alice/timetable?week=2026-09-14")
+    assert_receive {:pending_read, {:lessons, "a", ~D[2026-09-14], _}, current_from}
+    assert has_element?(view, ".week-lesson", "Cours A")
+    refute render(view) =~ "en cours d’actualisation"
+    GenServer.reply(current_from, {:ok, lessons})
+
+    assert_receive {:pending_read, {:lessons, "a", ~D[2026-09-21], _}, other_from}
+    refute has_element?(view, "[data-inactive-cycle=B]")
+    GenServer.reply(other_from, {:ok, other})
+    render_async(view)
+
+    assert has_element?(view, "[data-inactive-cycle=B]", "Cours B")
+    assert has_element?(view, ".week-lesson:not(.week-lesson-inactive)", "Cours A")
+    refute render(view) =~ "en cours d’actualisation"
+  end
+
+  test "cached agenda stays visible during refresh and survives a failed refresh", %{conn: conn} do
+    {:ok, children} = API.children()
+    {:ok, lessons} = API.lessons("a", ~D[2026-09-14], ~D[2026-09-20])
+    old = CaptainNotes.Pronote.Session.for_account("family")
+    DynamicSupervisor.terminate_child(CaptainNotes.Pronote.Supervisor, old)
+
+    name =
+      {:via, Registry,
+       {CaptainNotes.Pronote.Registry, {"family", CaptainNotes.Accounts.fingerprint("family")}}}
+
+    server = start_supervised!({ControlledSession, {self(), children, name}})
+    CaptainNotes.Pronote.ReadCache.remember(server, {:children}, children)
+    CaptainNotes.Pronote.ReadCache.remember(server, {:events, "a"}, [])
+
+    CaptainNotes.Pronote.ReadCache.remember(
+      server,
       {:lessons, "a", ~D[2026-09-14], ~D[2026-09-20]},
       lessons
     )
+
+    CaptainNotes.Pronote.ReadCache.invalidate({:owner_reads, server})
 
     Application.put_env(:captain_notes, :pronote_client, CaptainNotes.Pronote)
     {:ok, view, _} = live(conn, "/alice?week=2026-09-14")

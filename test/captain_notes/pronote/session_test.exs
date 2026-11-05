@@ -513,6 +513,44 @@ defmodule CaptainNotes.Pronote.SessionTest do
              Pronote.set_discussion_read("child-a", "notice-unknown", true, server)
   end
 
+  for parent <- [false, true] do
+    @parent_notice parent
+    test "information without acknowledgement changes only its read status (parent: #{parent})" do
+      parent = @parent_notice
+
+      {server, agent} =
+        session(
+          account: "parent-1",
+          direct_student: !parent,
+          notices: true,
+          notice_without_acknowledgement: true
+        )
+
+      {:ok, items} =
+        if parent,
+          do: Pronote.parent_discussions(server),
+          else: Pronote.discussions("child-a", server)
+
+      notice = Enum.find(items, &(&1.kind == :information))
+      refute notice.acknowledgement_required
+      assert notice.unread == 1
+      assert Agent.get(agent, & &1.notice_reads) == %{}
+
+      for read <- [true, false] do
+        assert {:ok, updated} =
+                 if(parent,
+                   do: Pronote.set_parent_discussion_read(notice.id, read, server),
+                   else: Pronote.set_discussion_read("child-a", notice.id, read, server)
+                 )
+
+        updated_notice = Enum.find(updated, &(&1.id == notice.id))
+        assert updated_notice.unread == if(read, do: 0, else: 1)
+        refute updated_notice.acknowledged
+        refute Agent.get(agent, & &1.notice_acknowledged)
+      end
+    end
+  end
+
   test "direct child profile reads only its own data and writes through its own session" do
     {server, agent} = session(direct_student: true)
     assert {:ok, [%{id: "child-a"}]} = Pronote.children(server)

@@ -7,8 +7,7 @@ const root = readFileSync(new URL('../../lib/captain_notes_web/components/layout
 const source = root.match(/<script id="select-startup-image">([\s\S]*?)<\/script>/)[1];
 const images = readFileSync(new URL('../../lib/captain_notes_web/components/layouts/startup_images.html.heex', import.meta.url), 'utf8');
 
-function launch(width, height, ratio) {
-  let portrait = true;
+function launch(width, height, ratio, portrait = true) {
   const queries = [];
   const links = [...images.matchAll(/media="([^"]+)"\s+href=\{~p"([^"]+)"\}/g)].map(([, media, href]) => ({
     media, href, attached: true,
@@ -54,3 +53,28 @@ test('an unsupported screen keeps the original declarations instead of choosing 
   assert.equal(page.active().length, 44);
   assert.ok(page.active().every(link => link.media));
 });
+
+for (const [width, height] of [
+  [768, 1024], [744, 1133], [810, 1080], [820, 1180],
+  [834, 1112], [834, 1194], [834, 1210], [1024, 1366], [1032, 1376]
+]) {
+  for (const portrait of [true, false]) {
+    test(`tablet ${width}x${height} launches in ${portrait ? 'portrait' : 'landscape'} and rotates`, () => {
+      const page = launch(width, height, 2, portrait);
+      const check = orientation => {
+        const [w, h] = orientation ? [width * 2, height * 2] : [height * 2, width * 2];
+        assert.equal(page.active().length, 1);
+        assert.equal(page.active()[0].href, `/images/startup/launch-${w}x${h}.png`);
+        assert.equal(page.active()[0].media, undefined);
+        const png = readFileSync(new URL(`../../priv/static${page.active()[0].href}`, import.meta.url));
+        assert.equal(png.readUInt32BE(16), w);
+        assert.equal(png.readUInt32BE(20), h);
+      };
+      check(portrait);
+      page.rotate();
+      check(!portrait);
+      page.rotate();
+      check(portrait);
+    });
+  }
+}

@@ -279,16 +279,20 @@ defmodule CaptainNotesWeb.DashboardLive do
   def handle_event("mark-discussion", %{"id" => id}, socket) do
     discussion = Enum.find(socket.assigns.discussions, &(&1.id == id))
 
+    acknowledgement =
+      discussion && Map.get(discussion, :kind) == :information &&
+        Map.get(discussion, :acknowledgement_required, false)
+
     if (socket.assigns.section in ["messages", "parent-messages"] and discussion) &&
          is_nil(socket.assigns.message_saving) && !socket.assigns.messages_loading &&
-         (Map.get(discussion, :kind) != :information ||
+         (!acknowledgement ||
             Map.get(discussion, :can_acknowledge, false)) do
       api = socket.assigns.api
       account = socket.assigns.account
       child_id = socket.assigns.child.id
       generation = make_ref()
       parent_inbox = socket.assigns.section == "parent-messages"
-      target_read = Map.get(discussion, :kind) == :information || discussion.unread > 0
+      target_read = acknowledgement || discussion.unread > 0
 
       {:noreply,
        socket

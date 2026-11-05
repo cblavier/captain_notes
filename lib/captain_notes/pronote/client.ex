@@ -534,7 +534,7 @@ defmodule CaptainNotes.Pronote.Client do
           reference = CaptainNotes.Pronote.Information.reference(raw)
 
           action =
-            if notice.kind == :information,
+            if notice.acknowledgement_required,
               do:
                 {:acknowledgement, reference,
                  CaptainNotes.Pronote.Information.acknowledgement_payload(detail)},

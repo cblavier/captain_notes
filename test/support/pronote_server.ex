@@ -491,7 +491,8 @@ defmodule CaptainNotes.Test.PronoteServer do
              "V" => [
                %{
                  "N" => "question",
-                 "genreReponse" => 0,
+                 "genreReponse" =>
+                   if(state.options[:notice_without_acknowledgement], do: 1, else: 0),
                  "reponse" => %{
                    "V" => %{
                      "N" => "response",
@@ -548,7 +549,7 @@ defmodule CaptainNotes.Test.PronoteServer do
     assert notice["genrePublic"] == genre
     assert notice["validationDirecte"] == true
 
-    if notice["N"] == "info" do
+    if notice["N"] == "info" && !state.options[:notice_without_acknowledgement] do
       assert notice["marqueLueSeulement"] == false
 
       assert notice["listeQuestions"] == [
@@ -577,7 +578,7 @@ defmodule CaptainNotes.Test.PronoteServer do
      %{
        state
        | notice_reads: Map.put(state.notice_reads, notice["N"], notice["lue"]),
-         notice_acknowledged: state.notice_acknowledged || notice["N"] == "info"
+         notice_acknowledged: state.notice_acknowledged || Map.has_key?(notice, "listeQuestions")
      }, nil, false}
   end
 

@@ -241,28 +241,28 @@ defmodule CaptainNotesWeb.CoreComponents do
   attr :loading, :boolean, default: false
 
   def communication_status_button(assigns) do
-    information = Map.get(assigns.discussion, :kind) == :information
+    acknowledgement =
+      Map.get(assigns.discussion, :kind) == :information &&
+        Map.get(assigns.discussion, :acknowledgement_required, false)
 
     confirmed =
-      if information,
+      if acknowledgement,
         do: Map.get(assigns.discussion, :acknowledged, false),
         else: assigns.discussion.unread == 0
 
     assigns =
       assign(assigns,
-        information: information,
-        confirmed: confirmed,
-        available: !information || Map.get(assigns.discussion, :acknowledgement_required, false)
+        acknowledgement: acknowledgement,
+        confirmed: confirmed
       )
 
     ~H"""
     <button
-      :if={@available}
       type="button"
       class="btn btn-sm btn-ghost gap-2 shrink-0 discussion-status"
       aria-pressed={to_string(@confirmed)}
       aria-label={
-        if @information,
+        if @acknowledgement,
           do: "J’ai pris connaissance de cette information",
           else: if(@confirmed, do: "Marquer comme non lu", else: "Marquer comme lu")
       }
@@ -270,7 +270,8 @@ defmodule CaptainNotesWeb.CoreComponents do
       phx-click="mark-discussion"
       phx-value-id={@discussion.id}
       disabled={
-        @saving != nil || @loading || (@information && !Map.get(@discussion, :can_acknowledge, false))
+        @saving != nil || @loading ||
+          (@acknowledgement && !Map.get(@discussion, :can_acknowledge, false))
       }
     >
       <.icon
