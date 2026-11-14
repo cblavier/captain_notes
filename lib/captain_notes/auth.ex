@@ -6,7 +6,6 @@ defmodule CaptainNotes.Auth do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   def init(_), do: {:ok, %{}}
-  def enabled?, do: true
   def configured?, do: Accounts.all() != []
   def now, do: System.system_time(:second)
   def expires_at(session), do: session["auth_expires_at"] || 0

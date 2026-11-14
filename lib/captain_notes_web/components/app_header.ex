@@ -65,7 +65,7 @@ defmodule CaptainNotesWeb.AppHeader do
             </span>
             <div id="child-identity">
               <p
-                :if={@child && Map.get(@child, :school_name) not in [nil, ""]}
+                :if={Map.get(@child, :school_name) not in [nil, ""]}
                 id="school-name"
                 class="mb-1 text-xs font-medium text-[var(--muted-ink)] sm:text-sm"
               >
@@ -207,7 +207,6 @@ defmodule CaptainNotesWeb.AppHeader do
               <span>Réglages</span>
             </button>
             <.form
-              :if={CaptainNotes.Auth.enabled?()}
               for={%{}}
               action={~p"/logout"}
               phx-submit={@logout_event}
